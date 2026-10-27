@@ -44,6 +44,11 @@ QUEST_RE = re.compile(r'player\s*\.\s*(inc_quest_state|set_quest_state|add_quest
 LUST_RE = re.compile(r'player\s*\.\s*change_lust(?:_simple)?\(([^()]*(?:\([^()]*\)[^()]*)*)\)')
 ASSIGN_RE = re.compile(r'^\s*(\w+)\s*=\s*(True|False|None|-?\d+)\s*$')
 ANY_ASSIGN_RE = re.compile(r'^\s*(\w+)\s*(?:[-+*/]?=)(?!=)')
+SCHEDULE_RE = re.compile(r'add_appointment\(\s*(\d+)\s*,')
+MESSAGE_RES = (re.compile(r'(\w+)\s*\.\s*(?:create_message|send_message|create_text_message)\(\s*(\d+)'),
+               re.compile(r'(\w+)\s*\.\s*add_action_cooldown\([^)]*i_message_text\s*=\s*(\d+)'))
+SEXT_RE = re.compile(r'(\w+)\s*\.\s*(?:add_queued_sexting|use_sexting_image)\(\s*(\d+)')
+WEBACT_RE = re.compile(r'(\w+)\s*\.\s*activate_web_search\(\s*["\']([^"\']+)["\']')
 PYCALL_RE = re.compile(r'renpy\s*\.\s*(call|jump)\(\s*["\']([\w\.]+)["\']')
 
 WEAR_ATTRS = ("swimwear", "nightwear", "dinerwear", "receptionwear", "doctorwear")
@@ -271,6 +276,9 @@ class Index(object):
         self.dispatch = {}        # main loop action -> Edge
         self.node_assigns = {}    # id(If/Menu node) -> flags set before it
         self.node_lust = {}       # id(If/Menu node) -> player lust changes before it
+        self.node_owner = {}      # id(If/Menu node) -> top level label
+        self.label_locals = {}    # top level label -> names it assigns
+        self.item_quests = {}     # quest item name -> quest it belongs to
         self.statement_count = 0
 
     # -- building ----------------------------------------------------------
@@ -295,11 +303,12 @@ class Index(object):
         for name in self.top:
             ctx = {"owner": name, "entry": name, "entry_path": (),
                    "assigns": {}, "unstable": set(), "created": [], "snapshots": [],
-                   "lust": ()}
+                   "lust": (), "all_assigned": set()}
             self._ctx = ctx
             self._walk(labels[name].block, ctx, ())
             # Variables changed while the label runs (counters...) cannot
             # be known in advance.
+            self.label_locals[name] = set(ctx["unstable"]) | set(ctx["all_assigned"])
             for obj in ctx["created"]:
                 for var in ctx["unstable"]:
                     obj.assigns.pop(var, None)
@@ -307,6 +316,18 @@ class Index(object):
                 for var in ctx["unstable"]:
                     snap.pop(var, None)
         self._ctx = None
+
+        # Items that are really the state of a quest
+        # (get_display_quest_item: "Amy_nightwear" -> "Affection_max_level5_A").
+        self.item_quests = {}
+        for node in namemap.values():
+            if cls_name(node) not in ("Python", "EarlyPython"):
+                continue
+            src = _python_source(node)
+            if "def get_display_quest_item" not in src:
+                continue
+            for m in re.finditer(r'l_quest\.name\s*==\s*["\']([^"\']+)["\']\s+and\s+i_name\s*==\s*["\']([^"\']+)["\']', src):
+                self.item_quests.setdefault(m.group(2), m.group(1))
 
         # Main loop actions: "do_workout_pullups" -> call edge.
         self.dispatch = {}
@@ -382,6 +403,7 @@ class Index(object):
                 # Flags as they are when this condition is checked.
                 snap = dict(ctx["assigns"])
                 self.node_assigns[id(node)] = snap
+                self.node_owner[id(node)] = ctx["owner"]
                 self.node_lust[id(node)] = ctx["lust"]
                 ctx["snapshots"].append(snap)
             if c == "If":
@@ -479,6 +501,22 @@ class Index(object):
             subj, kind, name = m.group(1), m.group(2), m.group(3)
             self.markers.setdefault((kind, name), []).append(self._remember(
                 Marker(kind, name, subj, owner, entry, path, rel, node)))
+        for m in SEXT_RE.finditer(src):
+            # A picture message: the scene that queues it "unlocks" it.
+            self.markers.setdefault(("sexting", m.group(2)), []).append(self._remember(
+                Marker("sexting", m.group(2), m.group(1), owner, entry, path, rel, node)))
+        for m in SCHEDULE_RE.finditer(src):
+            # An appointment being arranged (player.add_appointment(N, ...)).
+            self.markers.setdefault(("schedule", m.group(1)), []).append(self._remember(
+                Marker("schedule", m.group(1), "", owner, entry, path, rel, node)))
+        for rx in MESSAGE_RES:
+            for m in rx.finditer(src):
+                # A phone message being sent; some of them arrange appointments.
+                self.markers.setdefault(("message", m.group(2)), []).append(self._remember(
+                    Marker("message", m.group(2), m.group(1), owner, entry, path, rel, node)))
+        for m in WEBACT_RE.finditer(src):
+            self.markers.setdefault(("websearch", m.group(2)), []).append(self._remember(
+                Marker("websearch", m.group(2), m.group(1), owner, entry, path, rel, node)))
         for m in QUEST_RE.finditer(src):
             func, args = m.group(1), split_args(m.group(2))
             if not args:
@@ -512,6 +550,7 @@ class Index(object):
             m = ASSIGN_RE.match(line)
             if m:
                 ctx["assigns"][m.group(1)] = m.group(2)
+                ctx["all_assigned"].add(m.group(1))
                 continue
             m = ANY_ASSIGN_RE.match(line)
             if m:
@@ -1472,6 +1511,19 @@ def step_values(index, cond, store):
     return out
 
 
+def uses_label_locals(index, cond):
+    """Does the condition read variables its own label sets while running?"""
+    if cond.step is None:
+        return False
+    owner = index.node_owner.get(id(cond.step[1]))
+    names = index.label_locals.get(owner)
+    if not names:
+        return False
+    known = index.node_assigns.get(id(cond.step[1]), {})
+    used = set(re.findall(r"\b([A-Za-z_]\w*)\b", cond.src))
+    return bool((used & names) - set(known))
+
+
 def auto_succeed_kwargs(index, plan):
     """Keyword arguments that make the target label skip its checks."""
     out = {}
@@ -1553,6 +1605,64 @@ def action_text_for(texts, name):
         if cand in texts:
             return texts[cand]
     return ""
+
+
+def _python_source(node):
+    code = getattr(node, "code", None)
+    return text(getattr(code, "source", code))
+
+
+def sexting_rules(index, label="check_create_sexting_message"):
+    """
+    Reads the game's own rules for the picture messages a girl sends
+    (levels 100..400): the conditions checked first, the stat condition
+    of each level and the range of message texts used for it.
+    """
+    out = {"guards": [], "levels": {}, "texts": {}}
+    node = index.labels.get(label)
+    if node is None:
+        return out
+    for st in node.block or []:
+        c = cls_name(st)
+        if c == "If":
+            for cond, blk in st.entries:
+                for sub in blk or []:
+                    m = re.search(r"l_level\s*=\s*(\d+)", _python_source(sub)) \
+                        if cls_name(sub) == "Python" else None
+                    if m:
+                        out["levels"][int(m.group(1))] = text(cond)
+                if blk and Index._terminal(blk[-1]) and not out["levels"]:
+                    out["guards"].append(text(cond))
+    for st in _all_nodes(node.block):
+        if cls_name(st) == "Python":
+            for m in re.finditer(r"add_queued_sexting\(\s*l_sexting_image\.image\s*,\s*renpy\.random\.randint\(\s*(\d+)\s*,\s*(\d+)",
+                                 _python_source(st)):
+                a, b = int(m.group(1)), int(m.group(2))
+                out["texts"].setdefault(a // 100 * 100, (a, b))
+    return out
+
+
+def _all_nodes(block):
+    for node in block or []:
+        yield node
+        for sub in Index._sub_blocks(node):
+            for x in _all_nodes(sub):
+                yield x
+
+
+def random_exit_steps(index, label):
+    """Steps that skip the random "you find nothing" exits of a label."""
+    out = []
+    node = index.labels.get(label)
+    if node is None:
+        return out
+    for st in _all_nodes(node.block):
+        if cls_name(st) != "If":
+            continue
+        for i, (cond, blk) in enumerate(st.entries):
+            if "random" in text(cond) and blk and Index._terminal(blk[-1]):
+                out.append(("guard", st, i))
+    return out
 
 
 # ---------------------------------------------------------------------------

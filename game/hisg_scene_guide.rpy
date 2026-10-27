@@ -327,7 +327,7 @@ init 900 python:
                 return "ok", t, None
             if who is char and (guided or hisg_outfit_allowed(char, d["attr"], d["value"]) or d["op"] != "=="):
                 return "auto", t + " - the guide changes it", None
-            return "bad", t + " - she won't wear it yet", None
+            return "bad", t + hisg_outfit_missing_text(who, d["attr"], d["value"]), hisg_outfit_link(who, d["attr"], d["value"])
         if k == "alone":
             return "auto", u"You are alone with %s - the guide sends the others away" % nm, None
         if k == "company":
@@ -349,9 +349,13 @@ init 900 python:
             if guided:
                 return "auto", t + " - forced by Guided mode", None
             return "unknown", t + u": " + hisg_esc(c.expr), None
+        if k == "other" and hisg.RUNTIME["index"] is not None and hisg.uses_label_locals(hisg.RUNTIME["index"], c):
+            return None  # depends on values the scene sets while it runs
         v, _r = hisg_eval(c, char, defaults)
-        if k == "other" and v:
-            return None  # a technical condition that is already fine
+        if k == "other" and (v or _r == "local"):
+            return None  # a technical condition that is fine or set while it runs
+        if k == "other" and hisg_current_kind[0] in ("message", "schedule"):
+            return None  # the game's own timing checks for sending messages
         state = "unknown" if v is None else ("ok" if v else "bad")
         if guided and state != "ok":
             state = "auto"
@@ -444,10 +448,91 @@ init 900 python:
                     out.append(other)
         return out
 
+    def hisg_special_outfit_quest(char, attr):
+        """The quest that gives her the special outfit (as the game checks it)."""
+        if attr == "swimwear":
+            item = char.fname + " swimwear"
+        elif attr == "nightwear":
+            item = "Heather_sexy_nurse_outfit" if char.id == heather.id else char.fname + "_nightwear"
+        else:
+            return None
+        idx = hisg_index()
+        q = idx.item_quests.get(item, item) if idx is not None else item
+        try:
+            if any(qp.name == q for qp in gl_quest_pool):
+                return q
+        except Exception:
+            pass
+        return None
+
+    def hisg_outfit_missing_text(char, attr, value):
+        if value == 1:
+            return u" - she wears it once her affection is high enough (level 2)"
+        if value == 2:
+            return u" - she wears it once she is in the mood for it (tease check, level 3)"
+        if value >= 3:
+            if hisg_special_outfit_quest(char, attr):
+                return u" - she doesn't have it yet: it comes from a quest"
+            return u" - she doesn't have it yet"
+        return u" - she won't wear it yet"
+
+    def hisg_outfit_link(char, attr, value):
+        if value >= 3:
+            q = hisg_special_outfit_quest(char, attr)
+            if q:
+                return (char, "quest", q)
+        return None
+
+    def hisg_outfit_row(char, meta, plan, guided):
+        """The outfit the game lists for the scene (e.g. her special dress)."""
+        if meta is None or not plan.location:
+            return None
+        attr = hisg_wear_attr(plan.location)
+        clothes = list(getattr(meta, "clothes", []) or [])
+        if not attr or not clothes or sorted(clothes) == [0, 1, 2]:
+            return None
+        for c in plan.conds:
+            if c.kind == "outfit" and c.data["attr"] == attr:
+                return None  # already listed
+        cur = getattr(char, attr, 0)
+        names = u" or ".join(hisg_wear_name(attr, v) for v in clothes)
+        t = u"%s wears her %s" % (hisg_esc(char.fname), names)
+        if cur in clothes:
+            return "ok", t, None
+        if guided or any(hisg_outfit_allowed(char, attr, v) for v in clothes):
+            return "auto", t + u" - the guide changes it", None
+        v = clothes[0]
+        return "bad", t + hisg_outfit_missing_text(char, attr, v), hisg_outfit_link(char, attr, v)
+
+    def hisg_arrange_link(char, ids):
+        """How the game arranges one of these appointments."""
+        idx = hisg_index()
+        for i in ids:
+            if idx.markers_for("schedule", str(i)):
+                return (char, "schedule", str(i))
+        try:
+            for mp in gl_message_pool:
+                if getattr(mp, "appointment_pool_id", None) in ids and idx.markers_for("message", str(mp.id)):
+                    return (char, "message", str(mp.id))
+        except Exception:
+            pass
+        return None
+
+    def hisg_pool_text(pool, i, char, attr):
+        try:
+            for x in pool:
+                if x.id == i:
+                    return hisg_esc(getattr(x, attr, "").replace("&1", char.fname).replace("&2", "her room"))
+        except Exception:
+            pass
+        return u""
+
     hisg_current_name = [""]
+    hisg_current_kind = [""]
 
     def hisg_card_data(char, kind, name):
         hisg_current_name[0] = name
+        hisg_current_kind[0] = kind
         guided = bool(persistent.hisg_guided)
         key = (char.fname, kind, name, guided, actions_left)
         cache = hisg.RUNTIME["details"]
@@ -485,11 +570,16 @@ init 900 python:
             d["requirements"] = getattr(meta, "requirements", "") if meta else ""
             d["status"] = ("Seen %s time%s" % (times, "" if times == 1 else "s")) if times else "Not seen yet"
             d["seen"] = times > 0
-            if meta is not None and (meta.is_sexting or meta.is_web_search):
-                d["notes"].append("This one is a picture on the phone (messages or web search), not a scene. "
-                                  "The game's own hints above say how to get it.")
+            if meta is not None and meta.is_sexting:
+                hisg_sexting_card(char, name, d, guided)
                 cache[key] = d
                 return d
+            if meta is not None and meta.is_web_search:
+                hisg_websearch_card(char, name, d, guided)
+                cache[key] = d
+                return d
+            if meta is None:
+                hisg_other_title(char, kind, name, d)
 
         plan = hisg_plan(char, kind, name)
         rows = []
@@ -523,8 +613,14 @@ init 900 python:
             elif guided:
                 rows.insert(0, ("auto", u"Not arranged yet - played anyway in Guided mode", None))
             else:
-                rows.insert(0, ("bad", u"Not arranged yet - the game arranges it (see Trigger above)", None))
+                rows.insert(0, ("bad", u"Not arranged yet - the game arranges it", hisg_arrange_link(char, ids)))
                 blocked.append("appointment")
+
+        orow = hisg_outfit_row(char, meta, plan, guided)
+        if orow is not None:
+            rows.insert(0, orow)
+            if orow[0] == "bad":
+                blocked.append("outfit")
 
         absent = [o for o in hisg_others_involved(char, meta, plan) if not hisg_on_island(o)]
         for other in absent:
@@ -559,8 +655,179 @@ init 900 python:
             d["replay"] = True
         elif plan.launchable:
             d["replay_hint"] = "Replay is available after you have seen it once."
+        if kind == "message":
+            d["replay"] = False
+            d["replay_hint"] = ""
+            d["play_label"] = "Get the message now"
+            d["play_call"] = ("hisg_message_run", name)
+            d["notes"].append("The game sends this message on its own when the time passes and the "
+                              "conditions hold (often with a random chance). The button sends it now.")
+            if not plan.marker:
+                d["play"] = False
+        elif kind in ("sexting", "websearch", "schedule"):
+            d["replay"] = False
+            d["replay_hint"] = ""
         cache[key] = d
         return d
+
+    def hisg_other_title(char, kind, name, d):
+        if kind == "sexting":
+            used = char.get_sexting_times_used(int(name), False) if hasattr(char, "get_sexting_times_used") else 0
+            d["title"] = u"Picture message %s" % name
+            d["status"] = "Received" if used else "Not received yet"
+            d["seen"] = bool(used)
+            d["notes"].append("The scene below sends this picture to your phone (it arrives a little later).")
+        elif kind == "websearch":
+            ws = char.get_web_search(name) if hasattr(char, "get_web_search") else None
+            d["title"] = u"Unlock web search: " + hisg_title(name)
+            d["status"] = "Unlocked" if (ws is not None and ws.known) else "Not unlocked yet"
+            d["seen"] = bool(ws is not None and ws.known)
+        elif kind == "schedule":
+            i = int(name)
+            d["title"] = u"Arrange: " + (hisg_pool_text(gl_appointment_pool, i, char, "description") or name)
+            arranged = hisg_appointment_arranged(char, [i])
+            d["status"] = "Arranged" if arranged else "Not arranged yet"
+        elif kind == "message":
+            d["title"] = u"Message: " + (hisg_pool_text(gl_message_pool, int(name), char, "description") or name)
+            d["desc"] = hisg_pool_text(gl_message_pool, int(name), char, "message_text")
+
+    # -- picture messages and web searches --------------------------------
+
+    def hisg_sexting_rules():
+        rt = hisg.RUNTIME
+        if rt.get("sexting_rules") is None:
+            rt["sexting_rules"] = hisg.sexting_rules(hisg_index())
+        return rt["sexting_rules"]
+
+    def hisg_sexting_card(char, name, d, guided):
+        level = int(name[8]) * 100 if len(name) > 8 and name[8].isdigit() else 0
+        d["title"] = u"Picture messages (%s)" % name.replace("Sexting_", "")
+        d["replay"] = False
+        if level == 500:
+            imgs = list(getattr(char, "images_sexting_5xx", []))
+            got = len([x for x in imgs if x.times_used > 0])
+            d["status"] = u"Received %s of %s" % (got, len(imgs))
+            idx = hisg_index()
+            for img in imgs:
+                if img.times_used > 0:
+                    d["rows"].append(("ok", u"Picture %s received" % img.image, None))
+                else:
+                    link = (char, "sexting", str(img.image)) if idx.markers_for("sexting", str(img.image)) else None
+                    d["rows"].append(("bad", u"Picture %s not received yet" % img.image, link))
+            d["notes"].append("These pictures are sent by particular scenes; open a missing one to see which.")
+            return
+        rules = hisg_sexting_rules()
+        lst = list(getattr(char, "images_sexting_%sxx" % (level // 100), []))
+        got = len([x for x in lst if x.times_used > 0])
+        d["status"] = u"Received %s of %s" % (got, len(lst))
+        nm = hisg_esc(char.fname)
+        rows, bad = d["rows"], []
+        def add(ok, text):
+            state = "ok" if ok else ("auto" if guided else "bad")
+            if guided and not ok:
+                text += u" - skipped in Guided mode"
+            rows.append((state, text, None))
+            if not ok:
+                bad.append(text)
+        add(getattr(char, "active", False), u"%s can text you (she is active)" % nm)
+        add(char.rsm[0].anger < 20, u"%s is not angry with you (anger below 20)" % nm)
+        add(player.get_action_allowed("sexting"), u"You haven't received a picture in the last hours")
+        add(char.get_action_allowed("sexting"), u"%s hasn't sent you a picture in the last days" % nm)
+        cond = rules["levels"].get(level)
+        if cond:
+            for src, neg in hisg.atoms(cond):
+                c = hisg.Cond(src, neg)
+                row = hisg_cond_row(c, char, guided)
+                if row is not None:
+                    rows.append(row)
+                    if row[0] == "bad":
+                        bad.append(row[1])
+        d["notes"].append("The game only sends these by chance (15% when time passes during the day) "
+                          "and a few hours later; the button sends the next one now.")
+        if got >= len(lst):
+            d["play_hint"] = "You have all pictures of this kind."
+        elif bad and not guided:
+            d["play_hint"] = "Not all requirements are met (marked with a cross) - switch to Guided mode to get one anyway."
+        else:
+            d["play"] = True
+            d["play_label"] = "Get a picture now"
+            d["play_call"] = ("hisg_sexting_run", level)
+
+    def hisg_websearch_card(char, name, d, guided):
+        ws = char.get_web_search(name) if hasattr(char, "get_web_search") else None
+        d["title"] = u"Web search: " + hisg_title(name)
+        d["replay"] = False
+        if ws is None:
+            d["notes"].append("This web search is not part of your game yet.")
+            return
+        d["status"] = u"Found %s of %s pictures" % (ws.last_image_found, ws.number_of_images)
+        rows = d["rows"]
+        blocked = False
+        if ws.known:
+            rows.append(("ok", u"Unlocked - you can search for it", None))
+        else:
+            idx = hisg_index()
+            link = (char, "websearch", name) if idx.markers_for("websearch", name) else None
+            rows.append(("bad", u"Not unlocked yet - a scene with %s tells you about it" % hisg_esc(char.fname), link))
+            blocked = True
+        free = player.get_action_allowed("pl_action_read")
+        if free:
+            rows.append(("ok", u"You haven't searched the web or read in the last hours", None))
+        elif guided:
+            rows.append(("auto", u"You searched the web not long ago - skipped in Guided mode", None))
+        else:
+            rows.append(("bad", u"You searched the web or read not long ago - wait a bit", None))
+            blocked = True
+        d["notes"].append("In the game every search only finds the next picture by chance (60%, then 50%, 40%, 30%). "
+                          "The guide's search always finds it.")
+        if ws.last_image_found >= ws.number_of_images:
+            d["play_hint"] = "You have found all pictures."
+        elif blocked and not (guided and ws.known):
+            d["play_hint"] = "Not all requirements are met (marked with a cross)."
+        else:
+            d["play"] = True
+            d["play_label"] = "Search the web now"
+            d["play_call"] = ("hisg_websearch_run", name)
+
+    def hisg_send_sexting(char, level, guided):
+        img = char.get_sexting_with_lowest_usage(level)
+        if img is None or img.times_used > 0:
+            renpy.notify("There is no new picture of this kind.")
+            return
+        a, b = hisg_sexting_rules()["texts"].get(level, (level, level))
+        char.add_queued_sexting(img.image, renpy.random.randint(a, b), 0)
+        char.check_send_queued_sexting(0)
+        if not guided:
+            # The same waiting times the game sets after a picture.
+            char.add_action_cooldown("sexting", 96, "")
+            player.add_action_cooldown("sexting", 4, "")
+        renpy.notify("%s sent you a picture - look at your messages." % char.fname)
+
+    def hisg_send_message(char, msg_id):
+        """Runs the game's own statement that sends this phone message."""
+        plan = hisg_plan(char, "message", msg_id)
+        mk = plan.marker if plan is not None else None
+        if mk is None:
+            renpy.notify("The guide cannot send this message.")
+            return
+        src = hisg.text(getattr(mk.node.code, "source", ""))
+        line = ""
+        for l in src.splitlines():
+            if hisg_re.search(r"(create_message|send_message|create_text_message|i_message_text)\W*\(?\s*=?\s*%s\b" % msg_id, l):
+                line = l.strip()
+                break
+        if not line:
+            renpy.notify("The guide cannot send this message.")
+            return
+        m = hisg_re.match(r"^(\w+)\s*=\s*(.*create_message\(.*)$", line)
+        if m and "add_conversation" not in line:
+            line = "player.add_conversation(%s)" % m.group(2)
+        ns = dict((n, char) for n in hisg.CHAR_NAMES)
+        exec(compile(line, "<scene-guide>", "exec"), store.__dict__, ns)
+        renpy.notify("%s sent you a message - look at your phone." % char.fname)
+
+    def hisg_websearch_steps():
+        return hisg.random_exit_steps(hisg_index(), "pl_action_web_search_item")
 
     # -- special actions (flash / grope / pose) -----------------------------
 
@@ -851,6 +1118,32 @@ label hisg_run(hisg_kind, hisg_name, hisg_char, hisg_replay=False):
     return
 
 
+label hisg_sexting_run(hisg_char, hisg_level):
+    $ hisg_send_sexting(hisg_char, hisg_level, bool(persistent.hisg_guided))
+    $ hisg_clear_cache()
+    return
+
+
+label hisg_message_run(hisg_char, hisg_msg_id):
+    $ hisg_send_message(hisg_char, hisg_msg_id)
+    $ hisg_clear_cache()
+    return
+
+
+label hisg_websearch_run(hisg_char, hisg_ws_name):
+    $ hisg_ws_item = hisg_char.get_web_search(hisg_ws_name)
+    # The search always finds the next picture.
+    $ hisg.RUNTIME["patcher"].force(hisg_websearch_steps())
+    $ hisg_begin(False)
+    $ start_scene()
+    call pl_action_web_search_item (hisg_ws_item, hisg_char) from _call_hisg_websearch
+    $ hisg_finish()
+    $ stop_scene()
+    if not persistent.hisg_guided:
+        $ player.add_action_cooldown("pl_action_read", 8, "You did a web search not long ago.")
+    return
+
+
 ## Styles -------------------------------------------------------------------
 
 style hisg_frame is default:
@@ -932,7 +1225,7 @@ screen hisg_tiles():
                     xsize 391
                     ysize hisg_height
                     for hisg_i, hisg_app in enumerate(hisg_list):
-                        if not (hisg_app.is_sexting or hisg_app.is_web_search):
+                        if True:
                             if hisg_app.is_special_type:
                                 textbutton u"▶":
                                     style "hisg_tile"
@@ -1050,11 +1343,17 @@ screen hisg_entry_card(hisg_char, hisg_kind, hisg_name):
 
         hbox:
             spacing 8
-            textbutton ("Play next step" if hisg_kind == "quest" else "Play"):
-                style "hisg_button"
-                sensitive hisg_d["play"]
-                action [Hide("hisg_card"), Call("hisg_run", hisg_kind, hisg_name, hisg_char, False)]
-            if hisg_kind != "quest":
+            if hisg_d.get("play_call"):
+                textbutton hisg_d.get("play_label", "Play"):
+                    style "hisg_button"
+                    sensitive hisg_d["play"]
+                    action [Hide("hisg_card"), Call(hisg_d["play_call"][0], hisg_char, hisg_d["play_call"][1])]
+            else:
+                textbutton ("Play next step" if hisg_kind == "quest" else "Play"):
+                    style "hisg_button"
+                    sensitive hisg_d["play"]
+                    action [Hide("hisg_card"), Call("hisg_run", hisg_kind, hisg_name, hisg_char, False)]
+            if hisg_kind != "quest" and not hisg_d.get("play_call"):
                 textbutton "Replay":
                     style "hisg_button"
                     sensitive hisg_d["replay"]
