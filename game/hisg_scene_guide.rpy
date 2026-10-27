@@ -360,8 +360,48 @@ init 900 python:
         eng, _e, tail = rest.partition(HISG_ENGINE_END)
         return head + tail + HISG_ENGINE_SEP + eng
 
+    def hisg_time_window(c):
+        """
+        For a condition that only reads the clock (actions_left): the times
+        it holds, in words. Tries every half hour of the day.
+        """
+        if set(hisg_re.findall(r"[A-Za-z_]\w*", c.src)) - {"actions_left", "and", "or", "not"}:
+            return None
+        ok = {}
+        for ap in range(0, 50):  # 48 = 07:00 ... 1 = 06:30 next morning, 0 / 49 = the day is over
+            v, _r = hisg.safe_eval(c.expr, {}, {"actions_left": ap})
+            if v is None:
+                return None
+            ok[ap] = v
+        day = [ap for ap in range(48, 0, -1) if ok[ap]]
+        now = hisg_ap_time(actions_left) if 0 < actions_left <= 48 else u"the day is over"
+        if not day:
+            if ok[0] or ok[49]:
+                return u"the day is over - time runs out and you go to sleep (now %s)" % now
+            return None
+        if len(day) == 48:
+            return u"any time of the day"
+        # Day order: 48 (07:00) down to 1 (06:30 next morning).
+        runs, run = [], [day[0]]
+        for ap in day[1:]:
+            if ap == run[-1] - 1:
+                run.append(ap)
+            else:
+                runs.append(run)
+                run = [ap]
+        runs.append(run)
+
+        def span(r):
+            if len(r) == 1:
+                return u"at %s" % hisg_ap_time(r[0])
+            return u"from %s to %s" % (hisg_ap_time(r[0]), hisg_ap_time(r[-1]))
+        return u"%s (now %s)" % (u" or ".join(span(r) for r in runs), now)
+
     def hisg_describe(c, char):
         """Plain words for common game conditions, the engine's text after it."""
+        window = hisg_time_window(c)
+        if window:
+            return window + hisg_engine(c)
         try:
             tree = hisg.pyast.parse(c.src.replace("<>", "!="), mode="eval").body
             words = hisg_words(tree, c.negated, char)
@@ -370,6 +410,42 @@ init 900 python:
         if words:
             return words + hisg_engine(c)
         return u"Another check in the game's script (point here to see it)" + hisg_engine(c)
+
+    def hisg_orgasm_text(action, want):
+        """The game's orgasm timers: orgasm3days runs for 3 days after you came."""
+        m = hisg_re.match(r"^orgasm(\d)days?(_text)?$", action)
+        if not m:
+            return None
+        days = int(m.group(1))
+        span = u"%s day%s" % (days, u"" if days == 1 else u"s")
+        if m.group(2):
+            left = hisg_cooldown_left(player, action)
+            if want:
+                return u"No text from the doctor about %s without an orgasm in the last 3 days" % span
+            return (u"The doctor texted you that you haven't come for %s (only with the sub-dermal monitor)%s"
+                    % (span, u"" if left is None else u" - still valid for %s" % hisg_hours(left)))
+        left = hisg_cooldown_left(player, "orgasm%sday%s" % (days, u"" if days == 1 else u"s"))
+        if want:
+            return u"You haven't had an orgasm for %s%s" % (
+                span, u"" if left is None else u" (that's in %s)" % hisg_hours(left))
+        return u"You had an orgasm in the last %s" % span
+
+    def hisg_cum_text(c):
+        """player.cum_in_pants(): a roll from erection, how horny you are and endurance."""
+        must_not = not hisg.check_must_pass(c)
+        try:
+            erect = player.get_effect_state("erection") > 0
+            horny = player.get_effect_state("horny")
+            end = player.get_endurance()
+        except Exception:
+            return u"Whether you cum in your pants (random)" + hisg_engine(c), None
+        limit = {3: 75 - end // 1.33, 2: 50 - end // 1.6, 1: 20 - end // 2.5}.get(horny, 0)
+        risk = max(0.0, min(100.0, limit)) / 100.0 if erect else 0.0
+        p = 1.0 - risk if must_not else risk
+        what = u"You don't cum in your pants" if must_not else u"You cum in your pants"
+        t = u"%s: %d%% chance now (horny level %s, endurance %s%s)" % (
+            what, int(round(p * 100)), horny, end, u"" if erect else u", no erection right now")
+        return t + hisg_engine(c), p
 
     HISG_SKILL_GETTER = {"charm": "get_charm", "strength": "get_strength", "looks": "get_looks",
                          "hacking": "get_hacking", "sneaking": "get_hacking", "endurance": "get_endurance"}
@@ -755,7 +831,7 @@ init 900 python:
                 return "ok", t, None
             return ("auto" if guided else "bad"), t, None
         if k == "poker":
-            return "auto", u"You win the poker game - the guide skips the card game", None
+            return "auto", u"You win every hand - the guide plays the cards for you, she undresses step by step", None
         if k == "location":
             return "auto", u"At %s - the guide takes you there" % hisg_location_text(d.get("location", "")), None
         if k == "char_location":
@@ -840,16 +916,27 @@ init 900 python:
         elif k == "stat":
             t = hisg_stat_text(c, char)
         elif k == "cooldown":
-            who = hisg_char_by_var(d["who"], char)
+            # Your own waiting times are kept on you, not on her.
+            who = player if d["who"] == "player" else hisg_char_by_var(d["who"], char)
             if d["action"] == "anger_block":
                 t = u"%s is not angry with you" % hisg_esc(who.fname)
+            elif hisg_orgasm_text(d["action"], d.get("want", True)):
+                t = hisg_orgasm_text(d["action"], d.get("want", True))
+            elif not d.get("want", True):
+                # The scene needs the waiting time to be running.
+                what = hisg_action_text(d["action"], who) or hisg_esc(d["action"].replace("_", " "))
+                left = hisg_cooldown_left(who, d["action"])
+                if left is not None:
+                    t = u"Only shortly after \u201c%s\u201d (%s left)" % (what, hisg_hours(left))
+                else:
+                    t = u"Only shortly after \u201c%s\u201d - that isn't the case now" % what
             else:
                 what = hisg_action_text(d["action"], who) or hisg_esc(d["action"].replace("_", " "))
                 left = hisg_cooldown_left(who, d["action"])
                 if v:
                     t = u"\u201c%s\u201d is possible right now" % what
                 elif left is None:
-                    t = u"\u201c%s\u201d is on hold for now" % what
+                    t = u"\u201c%s\u201d is not possible yet (the game doesn't say for how long)" % what
                 elif who is player:
                     t = u"\u201c%s\u201d possible again in %s" % (what, hisg_hours(left))
                 else:
@@ -857,14 +944,23 @@ init 900 python:
         elif k == "role":
             expr = d.get("expr", "")
             role = expr.split(".")[-1].replace("_", " ")
-            t = u"%s has to be the %s right now (%s)" % (nm, hisg_esc(role), hisg_esc(expr))
+            t = u"%s has to be the %s on duty right now" % (nm, hisg_esc(role))
             if guided and v is False:
                 t = u"%s takes over as the %s" % (nm, hisg_esc(role))
                 return "auto", t, None
         elif k == "item":
             t = u"You have “%s”" % hisg_esc(d["item"])
+        elif "cum_in_pants()" in c.src:
+            t, p = hisg_cum_text(c)
+            if guided:
+                return "auto", t + u" - Guided mode makes it go your way", None
+            if p is not None and p >= 0.999:
+                return "ok", t, None
+            return "unknown", t, None
         elif v is None and _r.startswith("call"):
-            t = u"Decided during the scene" + hisg_engine(c)
+            m = hisg_re.search(r"\.(\w+)\(", c.src)
+            what = m.group(1).replace("_", " ") if m else u"how it goes"
+            t = u"Decided while the scene plays (%s)" % hisg_esc(what) + hisg_engine(c)
         elif k == "other" and hisg_re.search(r"\bll?_\w+", c.src) and not hisg_re.search(r"\b[a-z]+\.ll?_", c.src):
             words = hisg_describe(c, char)
             t = (words if not words.startswith(u"Another check") else u"Decided during the scene" + hisg_engine(c))
@@ -1416,6 +1512,27 @@ init 900 python:
         store.location_detail = ""
         return rebuild
 
+    def hisg_draw_background(char):
+        scenes = hisg.RUNTIME.get("background") or []
+        for node in reversed(scenes):
+            try:
+                imspec = node.imspec
+                if not imspec:
+                    continue
+                name, expr = imspec[0], imspec[1]
+                if expr:
+                    img = renpy.python.py_eval(expr)
+                    if isinstance(img, basestring) and not renpy.loadable(renpy.substitute(img, translate=False)):
+                        continue
+                elif not renpy.has_image(" ".join(name), exact=True):
+                    continue
+                renpy.config.scene(getattr(node, "layer", "master"))
+                renpy.ast.show_imspec(imspec, atl=getattr(node, "atl", None))
+                return True
+            except Exception:
+                continue
+        return False
+
     def hisg_set_role(expr, char):
         """jobs.doctor -> setattr(jobs, "doctor", char) for this scene."""
         try:
@@ -1423,9 +1540,26 @@ init 900 python:
             obj = getattr(store, parts[0])
             for part in parts[1:-1]:
                 obj = getattr(obj, part)
+            # Kept for the whole scene (the game re-picks who is on duty on
+            # the way, e.g. when it draws the doctor's office) and put back
+            # afterwards.
+            hisg.RUNTIME.setdefault("roles", []).append((obj, parts[-1], getattr(obj, parts[-1]), char))
             setattr(obj, parts[-1], char)
         except Exception:
             pass
+
+    def hisg_roles_apply():
+        for obj, attr, _old, ch in hisg.RUNTIME.get("roles") or []:
+            if getattr(obj, attr, None) is not ch:
+                setattr(obj, attr, ch)
+
+    def hisg_roles_restore():
+        for obj, attr, old, _ch in reversed(hisg.RUNTIME.get("roles") or []):
+            try:
+                setattr(obj, attr, old)
+            except Exception:
+                pass
+        hisg.RUNTIME["roles"] = []
 
     def hisg_setup_effects(plan):
         for c in plan.conds:
@@ -1444,6 +1578,8 @@ init 900 python:
             renpy.notify("Could not prepare the replay: %s" % rt.get("replay_error", "save failed"))
             return None
         rt["replay_ok"] = False
+        rt["background"] = []
+        hisg_roles_restore()
         rt["patcher"].restore()
         rt["highlight"].clear()
         if kind == "special":
@@ -1496,6 +1632,7 @@ init 900 python:
         for st in plan.steps:
             if st[0] == "menu":
                 rt["highlight"].setdefault(st[1].name, set()).add(st[2])
+        rt["background"] = list(getattr(plan, "background", []) or [])
         values, kwvalues = hisg.resolve_args(hisg_index(), plan, char, store)
         if guided:
             kwvalues.update(hisg.auto_succeed_kwargs(hisg_index(), plan))
@@ -1531,6 +1668,8 @@ init 900 python:
             config.label_overrides.pop("poker_screen_call", None)
 
     def hisg_label_reached(name, abnormal):
+        if hisg.RUNTIME.get("roles"):
+            hisg_roles_apply()
         if name == "play_poker_start" and "poker_screen_call" in config.label_overrides:
             # Your turn first, so the win comes before she plays a hand.
             try:
@@ -1543,19 +1682,34 @@ init 900 python:
     hisg_prev_label_callback = [config.label_callback]
     config.label_callback = hisg_label_reached
 
-    def hisg_poker_win():
-        """She runs out of chips: the game goes on with your win."""
+    def hisg_poker_round():
+        """
+        You win one hand: she loses up to 100 chips, so (as in the game) she
+        takes off one more piece and the game shows that scene. When her
+        chips are gone the game goes on with your win. Returns True then.
+        """
         g = store.g_poker_game
-        g.participants[0].chips += g.participants[1].chips + g.pot
-        g.participants[1].chips = 0
+        girl, me = g.participants[1], g.participants[0]
+        take = girl.chips % 100 or min(100, girl.chips)
+        girl.chips -= take
+        me.chips += take + g.pot + me.bet + girl.bet
         g.pot = 0
-        g.out_of_chips = True
-        g.winner = 0
+        me.bet = girl.bet = 0
+        g.next_turn = 0  # your turn again next time round
+        if girl.max_undress > 0:
+            hundreds = (girl.chips + 99) // 100
+            girl.undress = max(1, girl.max_undress - hundreds)
+        if girl.chips <= 0:
+            g.out_of_chips = True
+            g.winner = 0
+            return True
+        return False
 
     def hisg_finish():
         rt = hisg.RUNTIME
         run = rt["run"]
         hisg_poker_shortcut(False)
+        hisg_roles_restore()
         rt["patcher"].restore()
         rt["highlight"].clear()
         rt["run"] = None
@@ -1674,6 +1828,9 @@ label hisg_run(hisg_kind, hisg_name, hisg_char, hisg_replay=False):
         # Moved to another place: draw it, since many scenes only show
         # the people on top of whatever is on screen.
         call main_game_background (location, location_detail, "goto_" + location) from _call_hisg_bg
+    # The picture the game shows just before this part (e.g. the arrival
+    # in the hallway before Desire's own lines).
+    $ hisg_draw_background(hisg_char)
     # Like the game's own replay: hide the people standing around while
     # the scene plays, and redraw the location afterwards.
     $ start_scene()
@@ -1684,8 +1841,11 @@ label hisg_run(hisg_kind, hisg_name, hisg_char, hisg_replay=False):
 
 
 label hisg_poker_win_call(l_entension, l_zoom, l_clothes_folder=""):
-    $ hisg_poker_win()
-    "The cards are on your side tonight - you win the game."
+    # Instead of a hand of cards: you win it, and the game shows what follows.
+    if hisg_poker_round():
+        "The cards are on your side tonight - you win the game."
+    else:
+        "You win the hand."
     return "hisg_poker_win"
 
 

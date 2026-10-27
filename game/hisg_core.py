@@ -276,6 +276,7 @@ class Edge(object):
         self.expr = expr          # "call expression": the expression
         self.node = node
         self.charvars = {}        # character variables set before the call
+        self.scenes = []          # Scene statements shown just before it
 
 
 class Index(object):
@@ -318,7 +319,7 @@ class Index(object):
         for name in self.top:
             ctx = {"owner": name, "entry": name, "entry_path": (),
                    "assigns": {}, "unstable": set(), "created": [], "snapshots": [],
-                   "lust": (), "all_assigned": set(), "charvars": {}}
+                   "lust": (), "all_assigned": set(), "charvars": {}, "scenes": []}
             self._ctx = ctx
             self._walk(labels[name].block, ctx, ())
             # Variables changed while the label runs (counters...) cannot
@@ -443,14 +444,21 @@ class Index(object):
                 self._walk(node.block, ctx, path)
             elif c in ("Python", "EarlyPython"):
                 self._scan_python(node, ctx, path)
+            elif c == "Scene":
+                # The last backgrounds shown before a call: a called label
+                # often only adds to what its caller put on screen.
+                ctx["scenes"] = (ctx.get("scenes") or [])[-3:] + [node]
             elif c == "Call":
                 args = self._call_args(node)
                 rel = self._rel(ctx, path)
                 if getattr(node, "expression", False):
-                    self.expr_edges.append(self._remember(
-                        Edge(None, ctx["entry"], rel, args, expr=text(node.label), node=node)))
+                    edge = Edge(None, ctx["entry"], rel, args, expr=text(node.label), node=node)
+                    edge.scenes = list(ctx.get("scenes") or [])
+                    self.expr_edges.append(self._remember(edge))
                 else:
-                    self._add_edge(Edge(text(node.label), ctx["entry"], rel, args, node=node))
+                    edge = Edge(text(node.label), ctx["entry"], rel, args, node=node)
+                    edge.scenes = list(ctx.get("scenes") or [])
+                    self._add_edge(edge)
             elif c == "Jump":
                 if not getattr(node, "expression", False):
                     self._add_edge(Edge(text(node.target), ctx["entry"], self._rel(ctx, path), [],
@@ -954,6 +962,7 @@ class Plan(object):
         self.location = ""
         self.defaults = {}        # label parameter -> default value source
         self.preset = {}          # character variables the game sets before the call
+        self.background = []      # Scene statements the caller shows before the target
         self.launchable = False
         self.reason = ""
         self.notes = []
@@ -1281,6 +1290,8 @@ def build_plan(index, kind, name, char, store, meta=None, marker=None):
         return plan
     t = plan.target_idx = best["target_idx"]
     plan.preset = best.get("preset", {})
+    if t >= 2 and plan.hops[t].edge is not None:
+        plan.background = list(getattr(plan.hops[t].edge, "scenes", []) or [])
     for hop in plan.hops:
         for pname, default in index.params.get(hop.label, []):
             if default is not None:
