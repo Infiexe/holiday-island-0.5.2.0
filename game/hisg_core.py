@@ -41,6 +41,7 @@ except NameError:  # Python 3
 
 MARK_RE = re.compile(r'(\w+)\s*\.\s*add_(scene|event|appointment)_seen\(\s*["\']([^"\']+)["\']')
 QUEST_RE = re.compile(r'player\s*\.\s*(inc_quest_state|set_quest_state|add_quest)\(([^()]*(?:\([^()]*\)[^()]*)*)\)')
+LUST_RE = re.compile(r'player\s*\.\s*change_lust(?:_simple)?\(([^()]*(?:\([^()]*\)[^()]*)*)\)')
 ASSIGN_RE = re.compile(r'^\s*(\w+)\s*=\s*(True|False|None|-?\d+)\s*$')
 ANY_ASSIGN_RE = re.compile(r'^\s*(\w+)\s*(?:[-+*/]?=)(?!=)')
 PYCALL_RE = re.compile(r'renpy\s*\.\s*(call|jump)\(\s*["\']([\w\.]+)["\']')
@@ -269,6 +270,7 @@ class Index(object):
         self.main_loop_idle = set()   # node names of "call screen main_game"
         self.dispatch = {}        # main loop action -> Edge
         self.node_assigns = {}    # id(If/Menu node) -> flags set before it
+        self.node_lust = {}       # id(If/Menu node) -> player lust changes before it
         self.statement_count = 0
 
     # -- building ----------------------------------------------------------
@@ -292,7 +294,8 @@ class Index(object):
 
         for name in self.top:
             ctx = {"owner": name, "entry": name, "entry_path": (),
-                   "assigns": {}, "unstable": set(), "created": [], "snapshots": []}
+                   "assigns": {}, "unstable": set(), "created": [], "snapshots": [],
+                   "lust": ()}
             self._ctx = ctx
             self._walk(labels[name].block, ctx, ())
             # Variables changed while the label runs (counters...) cannot
@@ -370,6 +373,7 @@ class Index(object):
     def _walk(self, block, ctx, path):
         prev = None
         saved_assigns = ctx["assigns"]
+        saved_lust = ctx["lust"]
         ctx["assigns"] = dict(saved_assigns)
         for node in block or []:
             self.statement_count += 1
@@ -378,6 +382,7 @@ class Index(object):
                 # Flags as they are when this condition is checked.
                 snap = dict(ctx["assigns"])
                 self.node_assigns[id(node)] = snap
+                self.node_lust[id(node)] = ctx["lust"]
                 ctx["snapshots"].append(snap)
             if c == "If":
                 for i, entry in enumerate(node.entries):
@@ -427,6 +432,7 @@ class Index(object):
                 prev = node
         # Values set inside a block are not known after it.
         ctx["assigns"] = saved_assigns
+        ctx["lust"] = saved_lust
 
     def _guards(self, node):
         out = []
@@ -440,6 +446,7 @@ class Index(object):
     def _remember(self, obj):
         ctx = getattr(self, "_ctx", None)
         obj.assigns = dict(ctx["assigns"]) if ctx else {}
+        obj.lust = ctx["lust"] if ctx else ()
         if ctx:
             ctx["created"].append(obj)
         return obj
@@ -495,6 +502,11 @@ class Index(object):
         for m in PYCALL_RE.finditer(src):
             # renpy.call("label", ...) inside Python: arguments are unknown.
             self._add_edge(Edge(m.group(2), entry, rel, [], how="python", node=node))
+        # Player lust changes (they can give an erection during the scene).
+        for m in LUST_RE.finditer(src):
+            args = split_args(m.group(1))
+            if args:
+                ctx["lust"] = ctx["lust"] + (args[0],)
         # Simple flags like "option11 = True" set before a menu.
         for line in src.splitlines():
             m = ASSIGN_RE.match(line)
@@ -585,6 +597,7 @@ class Cond(object):
         self.value = None         # True / False / None (unknown)
         self.reason = ""
         self.fixed = False        # set up by the mod
+        self.lust_before = ()     # player lust changes before the check
         if kind:
             self.kind = kind
         else:
@@ -1140,11 +1153,17 @@ def _candidate(index, mk, chain, mk_steps, char, global_ns, local_ns, store=None
         target_idx = 1
 
     steps, conds = [], []
+    carried = ()  # lust changes in the labels above, before they go on
     for i in range(target_idx + 1, len(chain)):
         steps.extend(chain[i].edge.path)
+        for c in per_hop[i]:
+            c.lust_before = carried + _step_lust(index, c)
         conds.extend(per_hop[i])
+        carried = carried + getattr(chain[i].edge, "lust", ())
     steps.extend(mk_steps)
-    conds.extend(path_conds(mk_steps))
+    for c in path_conds(mk_steps):
+        c.lust_before = carried + _step_lust(index, c)
+        conds.append(c)
 
     skipped = []
     for i in range(1, target_idx + 1):
@@ -1198,6 +1217,58 @@ def _candidate(index, mk, chain, mk_steps, char, global_ns, local_ns, store=None
             "target_label": chain[target_idx].label, "target_idx": target_idx}
 
 
+def _step_lust(index, cond):
+    if cond.step is None:
+        return ()
+    return index.node_lust.get(id(cond.step[1]), ())
+
+
+def lust_gain(cond, global_ns, local_ns):
+    """
+    Player lust gained in the scene before this condition is checked.
+    Returns (gain, exact) - exact is False when some change is unknown.
+    """
+    gain, exact = 0, True
+    for src in getattr(cond, "lust_before", ()):
+        v, reason = safe_value(src, global_ns, local_ns)
+        try:
+            gain += int(v)
+        except Exception:
+            exact = False
+    return gain, exact
+
+
+def lust_steps(cond, global_ns, local_ns):
+    """The single lust changes before the check (unknown ones left out)."""
+    out, exact = [], True
+    for src in getattr(cond, "lust_before", ()):
+        v, reason = safe_value(src, global_ns, local_ns)
+        try:
+            out.append(int(v))
+        except Exception:
+            exact = False
+    return out, exact
+
+
+def erection_odds(lust, has_erection, steps, overdose=False):
+    """
+    Chance to have an erection when the scene checks, following the game:
+    each lust gain that ends at 60 or more rolls lust // 3 against 1..80,
+    a drop below 90 takes the erection away.
+    Returns (probability, lust at the check).
+    """
+    p = 1.0 if has_erection else 0.0
+    level = lust
+    for g in steps:
+        level = max(0, min(100, level + g))
+        if g < 0 and level < 90:
+            p = 0.0
+        elif g > 0 and level >= 60 and not overdose:
+            hit = max(0, level // 3 - 1) / 80.0
+            p = p + (1.0 - p) * hit
+    return p, level
+
+
 def _identity_term(node):
     """Is this a comparison like char1.id == ivy.id / char1.fname == "Ivy"?"""
     if cls_name(node) != "Compare" or len(node.ops) != 1:
@@ -1211,6 +1282,11 @@ def _identity_term(node):
         if cls_name(side) == "Name" and side.id in CHAR_NAMES:
             return True
     return False
+
+
+def _carry(new, old):
+    new.lust_before = getattr(old, "lust_before", ())
+    return new
 
 
 def refine_identity(conds, global_ns, local_ns):
@@ -1246,7 +1322,7 @@ def refine_identity(conds, global_ns, local_ns):
                 return None
             for x in rest:
                 for a, neg in _atoms(x, False):
-                    out.append(Cond(a, neg, step=c.step))
+                    out.append(_carry(Cond(a, neg, step=c.step), c))
         else:
             if not ids_ok or not rest:
                 if not rest and ids_ok:
@@ -1254,9 +1330,9 @@ def refine_identity(conds, global_ns, local_ns):
                 continue
             if len(rest) == 1:
                 for a, neg in _atoms(rest[0], True):
-                    out.append(Cond(a, neg, step=c.step))
+                    out.append(_carry(Cond(a, neg, step=c.step), c))
             else:
-                out.append(Cond(" and ".join(unparse(x) for x in rest), True, step=c.step))
+                out.append(_carry(Cond(" and ".join(unparse(x) for x in rest), True, step=c.step), c))
     return out
 
 

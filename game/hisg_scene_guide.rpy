@@ -263,11 +263,48 @@ init 900 python:
         ns.update((n, char) for n in hisg.CHAR_NAMES)
         return hisg.safe_eval(c.expr, store.__dict__, ns)
 
+    def hisg_erection_row(c, char, guided):
+        """The scene checks for an erection: judge it by your lust."""
+        want = hisg.effect_wanted(c)
+        ns = dict((n, char) for n in hisg.CHAR_NAMES)
+        steps, exact = hisg.lust_steps(c, store.__dict__, ns)
+        gain = sum(x for x in steps if x > 0)
+        lust = player.lust
+        has_now = player.get_effect_state("erection") > 0
+        overdose = player.get_effect_state("purple tablet overdose") >= 1
+        p, level = hisg.erection_odds(lust, has_now, steps, overdose)
+        about = u"" if exact else u" about"
+        if want:
+            t = u"You have an erection when it matters (your lust: %s now,%s %s by then)" % (lust, about, level)
+            if p >= 0.999:
+                return "ok", t, None
+            if guided:
+                return "auto", t + u" - set by Guided mode", None
+            if p >= 0.3:
+                return "unknown", t + u" - %d%% chance" % int(p * 100 + 0.5), None
+            need = max(0, 60 - gain)
+            return "bad", t + u" - raise your lust to at least %s first (or take a blue pill)" % need, None
+        t = u"You stay without an erection (your lust: %s now,%s %s by then)" % (lust, about, level)
+        if has_now:
+            if guided:
+                return "auto", t + u" - set by Guided mode", None
+            return "bad", u"You have an erection now - it goes away when your lust drops", None
+        if p <= 0.001:
+            return "ok", t, None
+        if guided:
+            return "auto", t + u" - set by Guided mode", None
+        need = 60 - gain
+        hint = (u"lower your lust below %s to be sure" % need) if need > 0 \
+            else u"the scene adds +%s lust, so it is always a gamble" % gain
+        if p <= 0.7:
+            return "unknown", t + u" - %d%% chance to stay soft; %s" % (int((1 - p) * 100 + 0.5), hint), None
+        return "bad", t + u" - only %d%% chance to stay soft; %s" % (int((1 - p) * 100 + 0.5), hint), None
+
     def hisg_cond_row(c, char, guided, defaults=None):
         """(state, text, link) for one condition, or None to hide it."""
         k, d, nm = c.kind, c.data, hisg_esc(char.fname)
-        if k in ("dispatch",):
-            return None
+        if k in ("dispatch",) or "renpy.loadable" in c.src or "renpy.has_label" in c.src:
+            return None  # technical checks of the game's files
         if k == "identity":
             v, _r = hisg_eval(c, char, defaults)
             if v is not False:
@@ -299,9 +336,8 @@ init 900 python:
             return "auto", u"At %s - the guide takes you there" % hisg_location_text(d.get("location", "")), None
         if k == "effect":
             if d["effect"] == "erection":
-                t = u"You have an erection" if hisg.effect_wanted(c) else u"You don't have an erection"
-            else:
-                t = u"Effect %s %s %s" % (d["effect"], d["op"], d["value"])
+                return hisg_erection_row(c, char, guided)
+            t = u"Effect %s %s %s" % (d["effect"], d["op"], d["value"])
             v, _r = hisg_eval(c, char, defaults)
             if v:
                 return "ok", t, None
@@ -470,8 +506,7 @@ init 900 python:
                 continue
             if row[0] == "bad":
                 unmet = True
-                if c.kind in HISG_BLOCKING:
-                    blocked.append(c.kind)
+                blocked.append(c.kind)
             if row not in rows:
                 rows.append(row)
 
@@ -515,11 +550,11 @@ init 900 python:
         elif not guided and plan.location and not hisg_location_open(plan.location):
             d["play_hint"] = "%s is closed at this time of day." % hisg_location_text(plan.location).capitalize()
         elif not guided and blocked:
-            d["play_hint"] = "Do the steps marked with a cross first (or switch to Guided mode)."
+            d["play_hint"] = "Not all requirements are met (marked with a cross) - switch to Guided mode to play it anyway."
         else:
             d["play"] = True
-            if unmet:
-                d["play_hint"] = "Some requirements are not met yet - the scene may end differently."
+            if any(r[0] == "unknown" for r in rows) and not guided:
+                d["play_hint"] = "Rows marked ? are decided by chance or during the scene."
         if plan.launchable and d.get("seen"):
             d["replay"] = True
         elif plan.launchable:
