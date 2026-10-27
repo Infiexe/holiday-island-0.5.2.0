@@ -165,7 +165,13 @@ def unparse(n):
             s += " %s %s" % (_CMPOPS.get(cls_name(op), "?"), _paren(right, ("BoolOp",)))
         return s
     if c == "BinOp":
-        return "%s %s %s" % (_paren(n.left, ("BoolOp", "Compare")), _BINOPS.get(cls_name(n.op), "?"),
+        # Keep (a + b) % 3 apart from a + b % 3.
+        prec = _binop_prec(n)
+        left = unparse(n.left)
+        if cls_name(n.left) in ("BoolOp", "Compare", "UnaryOp") or \
+                (cls_name(n.left) == "BinOp" and _binop_prec(n.left) < prec):
+            left = "(%s)" % left
+        return "%s %s %s" % (left, _BINOPS.get(cls_name(n.op), "?"),
                              _paren(n.right, ("BoolOp", "Compare", "BinOp")))
     if c == "Call":
         args = [unparse(a) for a in n.args]
@@ -194,6 +200,10 @@ def unparse(n):
         inner = ", ".join(unparse(e) for e in n.elts)
         return "[%s]" % inner if c == "List" else "(%s)" % inner
     return "?"
+
+
+def _binop_prec(n):
+    return {"Add": 1, "Sub": 1, "Mult": 2, "Div": 2, "Mod": 2, "FloorDiv": 2, "Pow": 3}.get(cls_name(n.op), 0)
 
 
 def _paren(n, kinds):
@@ -1017,6 +1027,39 @@ def subject_ok(marker, char, store, index):
     return _arg_ok(subj, char, store)
 
 
+_FNAMES = {}
+
+
+def _girl_names(store):
+    """First names of the characters ("Yvette" -> its variable name)."""
+    key = id(store)
+    if key not in _FNAMES:
+        out = {}
+        for var, obj in list(getattr(store, "__dict__", {}).items()):
+            if _is_char_obj(obj) and getattr(obj, "fname", "") and (obj.fname or "").lower() == var:
+                out[obj.fname] = var
+        _FNAMES.clear()
+        _FNAMES[key] = out
+    return _FNAMES[key]
+
+
+def _names_other_girl(src, char, store):
+    """A text like "Yvette blue underwear" in a condition about `char`."""
+    if store is None or char is None or not any(n in src for n in CHAR_NAMES + ("i_char",)):
+        return False
+    if not re.search(r"get_quest_state\(|\bi_name\b|_item", src):
+        return False  # only presents and quests are named after a girl
+    names = _girl_names(store)
+    for lit in re.findall(r'"([^"]*)"|\'([^\']*)\'', src):
+        words = re.split(r"[_\s]+", lit[0] or lit[1])
+        if getattr(char, "fname", None) in words:
+            continue
+        for w in words:
+            if w in names and w != getattr(char, "fname", None) and not re.search(r"\b%s\b" % names[w], src):
+                return True
+    return False
+
+
 def _edge_identity_ok(edge, global_ns, local_ns):
     """False when the call site is only reached for another character."""
     try:
@@ -1025,7 +1068,8 @@ def _edge_identity_ok(edge, global_ns, local_ns):
         return True
 
 
-def find_chains(index, start, char, store, global_ns, local_ns, max_depth=12, max_chains=24):
+def find_chains(index, start, char, store, global_ns, local_ns, max_depth=12, max_chains=24,
+                fixed_subject=False):
     """
     Walks the call graph upwards from label `start`.
 
@@ -1045,9 +1089,15 @@ def find_chains(index, start, char, store, global_ns, local_ns, max_depth=12, ma
             name, _r = safe_value(e.expr, global_ns, local_ns)
             if name == top:
                 edges.append(Edge(top, e.caller, e.path, e.args, node=e.node))
-        usable = [e for e in edges
-                  if e.caller not in seen and all(_arg_ok(a, char, store) for a in e.args)
-                  and _edge_identity_ok(e, global_ns, local_ns)]
+        fresh = [e for e in edges if e.caller not in seen]
+        me = (getattr(char, "fname", "") or "").lower()
+        usable = [e for e in fresh
+                  if fixed_subject or (
+                      (all(_arg_ok(a, char, store) for a in e.args)
+                       or (me and me in [_split_kw(a)[1].strip() for a in e.args]))  # yvette, faye
+                      and _edge_identity_ok(e, global_ns, local_ns))]
+        if fresh and not usable and top != MAIN_LOOP_LABEL:
+            continue  # only ever reached for another girl
         if top == MAIN_LOOP_LABEL or not usable or len(chain) > max_depth:
             results.append(chain)
             continue
@@ -1143,7 +1193,9 @@ def build_plan(index, kind, name, char, store, meta=None, marker=None):
     candidates = []
     for mk in markers:
         for start, mk_steps in [(mk.entry, mk.relpath)]:
-            for chain in find_chains(index, start, char, store, global_ns, local_ns):
+            subj = mk.subject.strip().split("=", 1)[-1].strip()
+            fixed = bool(store is not None and char is not None and subj == (getattr(char, "fname", "") or "").lower())
+            for chain in find_chains(index, start, char, store, global_ns, local_ns, fixed_subject=fixed):
                 cand = _candidate(index, mk, chain, list(mk_steps), char, global_ns, local_ns, store)
                 if cand is not None:
                     candidates.append(cand)
@@ -1382,9 +1434,10 @@ def _candidate(index, mk, chain, mk_steps, char, global_ns, local_ns, store=None
     for i in range(1, len(chain)):
         if subj in chain[i].edge.charvars:
             setter = chain[i].edge.charvars[subj]
-    if setter is not None:
+    if setter is not None and re.match(r"^[a-z]+$", setter):
+        # Only a named girl (event_char = miriam); char1 = event_char is her.
         v, reason = safe_value(setter, global_ns, {})
-        if not reason and _is_char_obj(v) and v is not char:
+        if not reason and _is_char_obj(v) and (v.fname or "").lower() == setter and v is not char:
             return None
     preset = {}
     if chain[target_idx].edge is not None:
@@ -1404,6 +1457,12 @@ def _candidate(index, mk, chain, mk_steps, char, global_ns, local_ns, store=None
             m = re.search(r'(?:_return|action_event)\s*==\s*["\'](\w+)["\']', src)
             if m:
                 entry_return = m.group(1)
+
+    # "Yvette blue underwear" given to her, or Yvette's lingerie quest asked
+    # about her: a route meant for another girl.
+    for c in conds:
+        if not c.negated and _names_other_girl(c.src, char, store):
+            return None
 
     # Fixed values handed to the target label (play_poker(..., i_appointment=True)):
     # a route that needs them to be different is impossible.
@@ -1518,6 +1577,11 @@ def erection_odds(lust, has_erection, steps, overdose=False):
 
 def _identity_term(node):
     """Is this a comparison like char1.id == ivy.id / char1.fname == "Ivy"?"""
+    if cls_name(node) == "UnaryOp" and cls_name(node.op) == "Not":
+        node = node.operand
+    if cls_name(node) == "Call" and _dotted(node.func) in ("renpy.has_label", "renpy.loadable") \
+            and any(n in unparse(node) for n in CHAR_NAMES):
+        return True  # her own version of a label or picture
     if cls_name(node) != "Compare" or len(node.ops) != 1:
         return False
     if cls_name(node.ops[0]) not in ("Eq", "NotEq", "Is", "IsNot", "In", "NotIn"):
@@ -1926,8 +1990,19 @@ class Patcher(object):
     def __init__(self):
         self.saved = []
 
+    @staticmethod
+    def _technical(node, idx):
+        """Checks of the game's own files (renpy.has_label...) are never forced."""
+        try:
+            srcs = [text(e[0]) for e in node.entries[:idx + 1]]
+        except Exception:
+            return False
+        return any("renpy.has_label" in s or "renpy.loadable" in s for s in srcs)
+
     def force(self, steps):
         for kind, node, idx in steps:
+            if kind in ("if", "guard") and self._technical(node, idx):
+                continue
             if kind == "if":
                 for j in range(idx):
                     self._set_entry(node, j, u"False")

@@ -208,9 +208,23 @@ init 900 python:
             pass
         return qname.replace("_", " ")
 
+    def hisg_role_local(name):
+        """l_bartender (set from jobs.bartender in the scene) -> who has the job now."""
+        if name.startswith("l_"):
+            try:
+                obj = getattr(store.jobs, name[2:], None)
+            except Exception:
+                obj = None
+            if obj is not None and hasattr(obj, "fname"):
+                return obj
+        return None
+
     def hisg_char_by_var(name, char):
         if name in hisg.CHAR_NAMES:
             return char
+        role = hisg_role_local(name)
+        if role is not None:
+            return role
         obj = getattr(store, name, None)
         if obj is not None and hasattr(obj, "fname") and hasattr(obj, "locations"):
             return obj
@@ -261,6 +275,10 @@ init 900 python:
         if idx is not None:
             ns.update(hisg.step_values(idx, c, store))
         ns.update((n, char) for n in hisg.CHAR_NAMES)
+        for name in set(hisg_re.findall(r"\bl_\w+", c.src)):
+            role = hisg_role_local(name)
+            if role is not None:
+                ns[name] = role
         return hisg.safe_eval(c.expr, store.__dict__, ns)
 
     def hisg_erection_row(c, char, guided):
@@ -310,6 +328,8 @@ init 900 python:
     def hisg_hours(ap):
         if ap is None or ap < 0:
             return u"a while"
+        if ap >= 999:
+            return u"a later part of the story"
         h = ap / 2.0
         if h >= 24:
             return u"%.1f days" % (h / 24.0) if h % 24 else u"%d days" % (h // 24)
@@ -324,8 +344,21 @@ init 900 python:
             pass
         return None
 
+    # Row text and the game's own condition, shown on hover.
+    HISG_ENGINE_SEP = u"\x1f"
+
+    HISG_ENGINE_END = u"\x1e"
+
     def hisg_engine(c):
-        return u" {size=-3}{color=#7f8b96}(%s){/color}{/size}" % hisg_esc(c.expr)
+        return HISG_ENGINE_SEP + hisg_esc(c.expr) + HISG_ENGINE_END
+
+    def hisg_engine_last(text):
+        """Moves the game's condition to the end of the row text."""
+        if HISG_ENGINE_SEP not in text:
+            return text
+        head, _s, rest = text.partition(HISG_ENGINE_SEP)
+        eng, _e, tail = rest.partition(HISG_ENGINE_END)
+        return head + tail + HISG_ENGINE_SEP + eng
 
     def hisg_describe(c, char):
         """Plain words for common game conditions, the engine's text after it."""
@@ -336,9 +369,118 @@ init 900 python:
             words = None
         if words:
             return words + hisg_engine(c)
-        return u"Game condition" + hisg_engine(c)
+        return u"Another check in the game's script (point here to see it)" + hisg_engine(c)
+
+    HISG_SKILL_GETTER = {"charm": "get_charm", "strength": "get_strength", "looks": "get_looks",
+                         "hacking": "get_hacking", "sneaking": "get_hacking", "endurance": "get_endurance"}
+
+    def hisg_skill_text(c, char):
+        """Your skill check: the chance to pass it, from your skill now."""
+        m = hisg_re.search(r"player\.check_(\w+)\((.*?)(?:,|\)\s*(?:==|!=|\)|$))", c.src)
+        if not m:
+            return u"Your skill check (partly random)" + hisg_engine(c), None
+        skill = m.group(1)
+        must = hisg.check_must_pass(c)
+        try:
+            ns = dict((n, char) for n in hisg.CHAR_NAMES)
+            level = int(hisg.safe_value(m.group(2), store.__dict__, ns)[0])
+            cur = getattr(player, HISG_SKILL_GETTER.get(skill, "get_" + skill))()
+        except Exception:
+            return u"Your %s check (partly random)" % skill + hisg_engine(c), None
+        if skill == "endurance":
+            p = 1.0 if cur >= level else 0.0
+            need = u"needs %s" % level
+        else:
+            p = 1.0 if cur > level else (0.5 if cur == level else (0.25 if cur == level - 1 else 0.0))
+            need = u"sure above %s, 50%% at %s, 25%% at %s" % (level, level, level - 1)
+        if not must:
+            p = 1.0 - p
+        what = u"Your %s check%s: %d%% chance (your %s: %s; %s)" % (
+            skill, u"" if must else u" has to fail", int(round(p * 100)), skill, cur, need)
+        return what + hisg_engine(c), p
+
+    def hisg_rand_p(n):
+        """renpy.random.randint(1, 100) >= 66 -> 0.35"""
+        if n.__class__.__name__ != "Compare" or len(n.ops) != 1:
+            return None
+        left, right = n.left, n.comparators[0]
+        op = n.ops[0].__class__.__name__
+        flip = {"Lt": "Gt", "Gt": "Lt", "LtE": "GtE", "GtE": "LtE"}
+        if "randint(" not in hisg.unparse(left):
+            if "randint(" not in hisg.unparse(right):
+                return None
+            left, right, op = right, left, flip.get(op, op)
+        try:
+            a, b = [eval(hisg.unparse(x), {}, {}) for x in left.args[:2]]
+            v = eval(hisg.unparse(right), {}, {})
+        except Exception:
+            return None
+        test = {"Eq": lambda x: x == v, "NotEq": lambda x: x != v, "Lt": lambda x: x < v,
+                "LtE": lambda x: x <= v, "Gt": lambda x: x > v, "GtE": lambda x: x >= v}.get(op)
+        if test is None or b < a:
+            return None
+        return len([x for x in range(a, b + 1) if test(x)]) / float(b - a + 1)
+
+    def hisg_chance_words(n, neg, char):
+        cn = n.__class__.__name__
+        if cn == "UnaryOp" and n.op.__class__.__name__ == "Not":
+            return hisg_chance_words(n.operand, not neg, char)
+        p = hisg_rand_p(n)
+        if p is not None:
+            return u"%d%% chance" % int(round((1.0 - p if neg else p) * 100))
+        if cn == "BoolOp":
+            is_and = n.op.__class__.__name__ == "And"
+            parts = [hisg_chance_words(v, neg, char) for v in n.values]
+            if any(x is None for x in parts):
+                return None
+            joiner = u", only if " if (is_and != neg) else u", or always if "
+            out = parts[0]
+            for part in parts[1:]:
+                out += (joiner.replace(u" if ", u" ") if part == u"the first time" else joiner) + part
+            return out
+        return hisg_words(n, neg, char)
+
+    def hisg_chance_text(c, char):
+        try:
+            tree = hisg.pyast.parse(c.src.replace("<>", "!="), mode="eval").body
+            words = hisg_chance_words(tree, c.negated, char)
+        except Exception:
+            words = None
+        if words:
+            return u"Random: " + words + hisg_engine(c)
+        return u"Random chance" + hisg_engine(c)
 
     HISG_FLIP = {"Eq": "NotEq", "NotEq": "Eq", "Lt": "GtE", "GtE": "Lt", "Gt": "LtE", "LtE": "Gt"}
+
+    def hisg_seen_words(n, neg, char):
+        """x.get_scene_seen("Name") == False -> "Amy has not seen scene “Name” yet"."""
+        cn = n.__class__.__name__
+        call, want = None, True
+        if cn == "Call":
+            call = n
+        elif cn == "Compare" and len(n.ops) == 1 and n.left.__class__.__name__ == "Call":
+            try:
+                rv = eval(hisg.unparse(n.comparators[0]), {}, {})
+            except Exception:
+                return None
+            if not isinstance(rv, bool):
+                return None
+            op = n.ops[0].__class__.__name__
+            if op not in ("Eq", "NotEq", "Is", "IsNot"):
+                return None
+            call, want = n.left, (rv == (op in ("Eq", "Is")))
+        if call is None:
+            return None
+        m = hisg_re.match(r"""^(\w+)\.get_(scene|event|appointment)_seen\(["'](\w+)["']\)$""", hisg.unparse(call))
+        if not m:
+            return None
+        if neg:
+            want = not want
+        who = hisg_char_by_var(m.group(1), char)
+        what = u"%s \u201c%s\u201d" % (HISG_KIND_TEXT.get(m.group(2), m.group(2)), hisg_title(m.group(3)))
+        if who is char and m.group(3) == hisg_current_name[0]:
+            return u"the first time" if not want else u"once you have seen it"
+        return u"%s has %sseen %s" % (hisg_esc(who.fname), u"" if want else u"not yet ", what)
 
     def hisg_words(n, neg, char):
         cn = n.__class__.__name__
@@ -370,6 +512,8 @@ init 900 python:
                        u" (now %s)" % hisg_ap_time(actions_left)
             if left == "cur_weekday" and rv in HISG_WEEKDAYS:
                 return (u"it's %s" if op == "Eq" else u"it's not %s") % rv
+            if left in ("gameday",) and isinstance(rv, int) and op in ("LtE", "Lt") and gameday > rv - (op == "Lt"):
+                return u"day %s or earlier (today is day %s) - too late in your game" % (rv - (op == "Lt"), gameday)
             if left in ("gameday",) and isinstance(rv, int):
                 return {"GtE": u"day %s or later", "Gt": u"after day %s", "LtE": u"day %s or earlier",
                         "Lt": u"before day %s", "Eq": u"day %s", "NotEq": u"not day %s"}.get(op, u"day %s") % rv + \
@@ -412,12 +556,27 @@ init 900 python:
                 if op in ("GtE", "Gt"):
                     return u"at least %s days since %s (now %s)" % (days + (op == "Gt"), what, since)
                 return u"less than %s days since %s (now %s)" % (days + (op == "LtE"), what, since)
+            # cl_functions.get_bartender() == jennifer
+            m = hisg_re.match(r'^cl_functions\.get_(\w+)\(\)(?:\.id)?\s*(==|!=)\s*(\w+)(?:\.id)?$', src)
+            if m and op in ("Eq", "NotEq"):
+                who = hisg_char_by_var(m.group(3), char)
+                return u"%s is %sthe %s on duty" % (hisg_esc(getattr(who, "fname", m.group(3))),
+                                                   u"" if op == "Eq" else u"not ", m.group(1).replace("_", " "))
+            # plane_girl.id == yvette.id
+            m = hisg_re.match(r'^plane_girl\.(?:id|fname)\s*(==|!=)\s*(\w+)\.(?:id|fname)$', src)
+            if m and op in ("Eq", "NotEq"):
+                who = hisg_char_by_var(m.group(2), char)
+                return u"%s %s the girl you met on the plane" % (hisg_esc(getattr(who, "fname", m.group(2))),
+                                                                  u"was" if op == "Eq" else u"was not")
             # jobs.roomservice.id != amy.id
             m = hisg_re.match(r'^jobs\.(\w+)(?:\.id)?\s*(==|!=)\s*(\w+)(?:\.id)?$', src)
             if m and op in ("Eq", "NotEq"):
                 who = hisg_char_by_var(m.group(3), char)
                 return u"%s is %sthe %s on duty" % (hisg_esc(getattr(who, "fname", m.group(3))),
                                                    u"" if op == "Eq" else u"not ", m.group(1).replace("_", " "))
+        seen = hisg_seen_words(n, neg, char)
+        if seen:
+            return seen
         if cn == "UnaryOp":
             return None
         if cn == "Call" and hisg.unparse(n).startswith("get_its_raining("):
@@ -487,6 +646,39 @@ init 900 python:
             pass
         return u"%s's %s check, level %s" % (nm, what, lvl) + hisg_engine(c)
 
+    def hisg_times_need(op, value):
+        """seen_times <op> <value> in words: "at least twice", "not exactly once"."""
+        def n(x):
+            return {0: u"never", 1: u"once", 2: u"twice"}.get(x, u"%s times" % x)
+        if op == "==":
+            return n(value) if value == 0 else u"exactly " + n(value)
+        if op == "!=" and value == 0:
+            return u"at least once"
+        if op == "!=":
+            return u"not exactly " + n(value)
+        if op == ">=":
+            return u"at least " + n(value)
+        if op == ">":
+            return u"more than " + n(value)
+        if op == "<=":
+            return u"at most " + n(value)
+        if op == "<":
+            return u"fewer than " + n(value)
+        return u"%s %s times" % (op, value)
+
+    def hisg_quest_owner(qname, who):
+        """Lingerie_presents1_Yvette -> Yvette, whoever the scene asks it of."""
+        try:
+            names = hisg._girl_names(store)
+        except Exception:
+            return who
+        for word in qname.split("_"):
+            if word in names and word != getattr(who, "fname", None):
+                obj = getattr(store, names[word], None)
+                if obj is not None:
+                    return obj
+        return who
+
     def hisg_quest_need(op, value):
         """Plain words for "quest step <op> <value>"."""
         if (op, value) in (("!=", -1), (">=", 0), (">", -1)):
@@ -504,6 +696,15 @@ init 900 python:
 
     def hisg_cond_row(c, char, guided, defaults=None):
         """(state, text, link) for one condition, or None to hide it."""
+        row = hisg_cond_row_raw(c, char, guided, defaults)
+        if row is None:
+            return None
+        text = row[1]
+        if HISG_ENGINE_SEP not in text and c.kind not in ("choice", "outfit", "location", "char_location", "alone", "poker", "invited"):
+            text = text + hisg_engine(c)
+        return (row[0], hisg_engine_last(text), row[2])
+
+    def hisg_cond_row_raw(c, char, guided, defaults=None):
         k, d, nm = c.kind, c.data, hisg_esc(char.fname)
         if k in ("dispatch",) or "renpy.loadable" in c.src or "renpy.has_label" in c.src:
             return None  # technical checks of the game's files
@@ -581,11 +782,20 @@ init 900 python:
             if guided:
                 return "auto", t + " - set by Guided mode", None
             return "bad", t, None
-        if k in ("chance", "skill"):
-            t = u"Random chance" if k == "chance" else u"Your skill check (random)"
+        if k == "skill":
+            t, p = hisg_skill_text(c, char)
             if guided:
-                return "auto", t + " - forced by Guided mode", None
-            return "unknown", t + u": " + hisg_esc(c.expr), None
+                return "auto", t + u" - Guided mode makes it go your way", None
+            if p is not None and p >= 0.999:
+                return "ok", t, None
+            if p is not None and p <= 0.001:
+                return "bad", t, None
+            return "unknown", t, None
+        if k == "chance":
+            t = hisg_chance_text(c, char)
+            if guided:
+                return "auto", t + u" - Guided mode makes it go your way", None
+            return "unknown", t, None
         if k == "other" and hisg.RUNTIME["index"] is not None and hisg.uses_label_locals(hisg.RUNTIME["index"], c):
             return None  # depends on values the scene sets while it runs
         v, _r = hisg_eval(c, char, defaults)
@@ -598,7 +808,7 @@ init 900 python:
             state = "auto"
         link = None
         if k == "quest":
-            who = hisg_char_by_var(d["who"], char)
+            who = hisg_quest_owner(d["quest"], hisg_char_by_var(d["who"], char))
             cur = hisg_quest_state(who, d["quest"])
             t = u"Quest “%s”: %s (now %s)" % (
                 hisg_esc(hisg_quest_title(d["quest"], who)), hisg_quest_need(d["op"], d["value"]),
@@ -620,10 +830,11 @@ init 900 python:
         elif k == "seen_times":
             who = hisg_char_by_var(d["who"], char)
             if who is char and d["name"] == hisg_current_name[0]:
-                t = u"Seen %s %s times before (now %s)" % (d["op"], d["value"], hisg_seen_times(who, d["what"], d["name"]))
+                t = u"Seen %s before (now %s)" % (hisg_times_need(d["op"], d["value"]), hisg_seen_times(who, d["what"], d["name"]))
                 return ("ok" if v else ("auto" if guided else "unknown")), t, None
-            t = u"“%s” seen %s %s times (now %s)" % (hisg_title(d["name"]), d["op"], d["value"],
-                                                          hisg_seen_times(who, d["what"], d["name"]))
+            t = u"%s %s \u201c%s\u201d seen %s (now %s)" % (
+                hisg_esc(who.fname), HISG_KIND_TEXT.get(d["what"], d["what"]), hisg_title(d["name"]),
+                hisg_times_need(d["op"], d["value"]), hisg_seen_times(who, d["what"], d["name"]))
             if v is False:
                 link = (who, d["what"], d["name"])
         elif k == "stat":
@@ -637,10 +848,12 @@ init 900 python:
                 left = hisg_cooldown_left(who, d["action"])
                 if v:
                     t = u"\u201c%s\u201d is possible right now" % what
+                elif left is None:
+                    t = u"\u201c%s\u201d is on hold for now" % what
                 elif who is player:
                     t = u"\u201c%s\u201d possible again in %s" % (what, hisg_hours(left))
                 else:
-                    t = u"%s said no to \u201c%s\u201d recently - possible again in %s" % (hisg_esc(who.fname), what, hisg_hours(left))
+                    t = u"%s: \u201c%s\u201d possible again in %s" % (hisg_esc(who.fname), what, hisg_hours(left))
         elif k == "role":
             expr = d.get("expr", "")
             role = expr.split(".")[-1].replace("_", " ")
@@ -654,7 +867,7 @@ init 900 python:
             t = u"Decided during the scene" + hisg_engine(c)
         elif k == "other" and hisg_re.search(r"\bll?_\w+", c.src) and not hisg_re.search(r"\b[a-z]+\.ll?_", c.src):
             words = hisg_describe(c, char)
-            t = (words if not words.startswith(u"Game condition") else u"Decided during the scene" + hisg_engine(c))
+            t = (words if not words.startswith(u"Another check") else u"Decided during the scene" + hisg_engine(c))
             return ("auto" if guided else "unknown"), t, None
         else:
             t = hisg_describe(c, char)
@@ -924,6 +1137,10 @@ init 900 python:
         if plan.skipped:
             d["notes"].append("The random trigger of this %s is skipped by the guide." % HISG_KIND_TEXT.get(kind, kind))
 
+        # Honest mode only plays what it could check: a scene the guide has
+        # to start directly (no route from the game found) is not seen as safe.
+        unchecked = (plan.launchable and plan.entry == "direct" and not guided and not d.get("seen")
+                     and kind in ("scene", "event", "appointment"))
         on_island = hisg_on_island(char)
         if (plan.launchable and hisg.needs_two_girls(idx, plan.target_label)
                 and not hisg.chars_in_label(plan.target_label, char, store)):
@@ -939,6 +1156,9 @@ init 900 python:
             d["play_hint"] = "%s is closed at this time of day." % hisg_location_text(plan.location).capitalize()
         elif not guided and blocked:
             d["play_hint"] = "Not all requirements are met (marked with a cross) - switch to Guided mode to play it anyway."
+        elif unchecked:
+            d["play_hint"] = ("The guide could not find where the game starts this, so it cannot check "
+                              "the requirements above - switch to Guided mode to play it anyway.")
         else:
             d["play"] = True
             if any(r[0] == "unknown" for r in rows) and not guided:
@@ -1388,6 +1608,8 @@ init 900 python:
         renpy.restart_interaction()
 
     def hisg_goto(char, kind, name, back=None):
+        if kind == "quest":
+            char = hisg_quest_owner(name, char)
         hist = hisg.RUNTIME.setdefault("history", [])
         if back is not None:
             hist.append(back)
@@ -1448,6 +1670,10 @@ label hisg_run(hisg_kind, hisg_name, hisg_char, hisg_replay=False):
         call create_list_of_chars_display from _call_hisg_list
         $ hisg_after_list(hisg_char)
     $ hisg_begin(hisg_replay)
+    if hisg_call[3]:
+        # Moved to another place: draw it, since many scenes only show
+        # the people on top of whatever is on screen.
+        call main_game_background (location, location_detail, "goto_" + location) from _call_hisg_bg
     # Like the game's own replay: hide the people standing around while
     # the scene plays, and redraw the location afterwards.
     $ start_scene()
@@ -1525,6 +1751,11 @@ style hisg_button_text is hisg_text:
     color "#e6edf3"
     hover_color "#ffffff"
     insensitive_color "#5d6670"
+
+style hisg_row is default:
+    padding (0, 0)
+    background None
+    hover_background None
 
 style hisg_link is default:
     padding (0, 0)
@@ -1677,7 +1908,18 @@ screen hisg_entry_card(hisg_char, hisg_kind, hisg_name):
                             text HISG_ICONS[hisg_state] style "hisg_text" color HISG_COLORS[hisg_state] min_width 16
                             vbox:
                                 xsize 376
-                                text hisg_text style "hisg_text"
+                                $ hisg_main, hisg_sep, hisg_eng = hisg_text.partition(HISG_ENGINE_SEP)
+                                if hisg_eng:
+                                    # The game's own condition shows when you point at the row.
+                                    button:
+                                        style "hisg_row"
+                                        action NullAction()
+                                        tooltip "hisg:" + hisg_eng
+                                        text hisg_main style "hisg_text"
+                                    if GetTooltip() == "hisg:" + hisg_eng:
+                                        text "In the game's script: " + hisg_eng style "hisg_small" color "#8fa0b0"
+                                else:
+                                    text hisg_text style "hisg_text"
                                 if hisg_link is not None:
                                     textbutton "Show how to get it":
                                         style "hisg_link"

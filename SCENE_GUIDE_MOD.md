@@ -34,15 +34,16 @@ Karta pokazuje te warunki ze statusem:
 | ➜ | opcja w menu, którą trzeba wybrać – w grze będzie oznaczona żółtą strzałką |
 
 Warunki są opisane zwykłymi słowami (np. „it's 17:00 or earlier (now 00:00)”, „Amy's lust at least 65
-(now 52)”, „at least 14 days since Mercedes appointment “Nightbar titfight” (now 6)”), a obok małym
-szarym drukiem jest oryginalny warunek z gry.
+(now 52)”, „Random: 35% chance, or always the first time”). Oryginalny warunek ze skryptu gry
+pokazuje się po najechaniu myszką na wiersz.
 
 Brakujące sceny i questy mają link „Show how to get it”, który otwiera ich kartę (np. kolejny
 krok questa z opisem z dziennika questów gry i przyciskiem „Play next step”).
 
 ## Tryby
 
-- **Honest** (domyślny): mod tylko przenosi Ciebie i postać we właściwe miejsce, przebiera ją
+- **Honest** (domyślny): Play działa tylko wtedy, gdy wszystkie warunki są spełnione i mod umiał je
+  sprawdzić. Mod tylko przenosi Ciebie i postać we właściwe miejsce, przebiera ją
   (jeśli zgodziłaby się w zwykłym dialogu zmiany stroju) i odsyła inne osoby. Statystyki,
   questy i wcześniejsze sceny są tylko pokazywane. Zamknięte lokacje (bar, spa, gabinet,
   restauracja) działają w swoich godzinach. Scena zużywa czas gry jak normalnie.
