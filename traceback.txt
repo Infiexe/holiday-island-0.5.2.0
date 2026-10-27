@@ -1,0 +1,73 @@
+﻿I'm sorry, but an uncaught exception occurred.
+
+While running game code:
+  File "renpy/common/000statements.rpy", line 570, in execute_call_screen
+    store._return = renpy.call_screen(name, *args, **kwargs)
+  File "game/gui_screens.rpy", line 3103, in execute
+  File "game/gui_screens.rpy", line 3103, in execute
+  File "game/gui_screens.rpy", line 3108, in execute
+  File "game/gui_screens.rpy", line 3116, in execute
+  File "game/gui_screens.rpy", line 3119, in execute
+  File "game/gui_screens.rpy", line 516, in execute
+  File "game/gui_screens.rpy", line 516, in execute
+  File "game/gui_screens.rpy", line 522, in execute
+  File "game/gui_screens.rpy", line 527, in execute
+  File "game/gui_screens.rpy", line 528, in execute
+  File "game/gui_screens.rpy", line 528, in <module>
+Exception: Couldn't find file 'images_webp.rpa'.
+
+-- Full Traceback ------------------------------------------------------------
+
+Full traceback:
+  File "script.rpyc", line 468, in script
+  File "renpy/ast.py", line 1969, in execute
+    self.call("execute")
+  File "renpy/ast.py", line 1957, in call
+    return renpy.statements.call(method, parsed, *args, **kwargs)
+  File "renpy/statements.py", line 278, in call
+    return method(parsed, *args, **kwargs)
+  File "renpy/common/000statements.rpy", line 570, in execute_call_screen
+    store._return = renpy.call_screen(name, *args, **kwargs)
+  File "renpy/exports.py", line 2983, in call_screen
+    rv = renpy.ui.interact(mouse="screen", type="screen", roll_forward=roll_forward)
+  File "renpy/ui.py", line 298, in interact
+    rv = renpy.game.interface.interact(roll_forward=roll_forward, **kwargs)
+  File "renpy/display/core.py", line 3101, in interact
+    repeat, rv = self.interact_core(preloads=preloads, trans_pause=trans_pause, pause=pause, pause_start=pause_start, **kwargs)
+  File "renpy/display/core.py", line 3512, in interact_core
+    root_widget.visit_all(lambda i : i.per_interact())
+  File "renpy/display/core.py", line 567, in visit_all
+    d.visit_all(callback, seen)
+  File "renpy/display/core.py", line 567, in visit_all
+    d.visit_all(callback, seen)
+  File "renpy/display/core.py", line 567, in visit_all
+    d.visit_all(callback, seen)
+  File "renpy/display/screen.py", line 432, in visit_all
+    callback(self)
+  File "renpy/display/core.py", line 3512, in <lambda>
+    root_widget.visit_all(lambda i : i.per_interact())
+  File "renpy/display/screen.py", line 443, in per_interact
+    self.update()
+  File "renpy/display/screen.py", line 631, in update
+    self.screen.function(**self.scope)
+  File "game/gui_screens.rpy", line 3103, in execute
+  File "game/gui_screens.rpy", line 3103, in execute
+  File "game/gui_screens.rpy", line 3108, in execute
+  File "game/gui_screens.rpy", line 3116, in execute
+  File "game/gui_screens.rpy", line 3119, in execute
+  File "game/gui_screens.rpy", line 516, in execute
+  File "game/gui_screens.rpy", line 516, in execute
+  File "game/gui_screens.rpy", line 522, in execute
+  File "game/gui_screens.rpy", line 527, in execute
+  File "game/gui_screens.rpy", line 528, in execute
+  File "game/gui_screens.rpy", line 528, in <module>
+  File "renpy/exports.py", line 2347, in image_size
+    surf = im.load()
+  File "renpy/display/im.py", line 688, in load
+    raise e
+Exception: Couldn't find file 'images_webp.rpa'.
+
+Windows-10-10.0.26100
+Ren'Py 7.4.4.1439
+Holiday Island 0.5.2.0
+Tue Oct 27 16:28:24 2026

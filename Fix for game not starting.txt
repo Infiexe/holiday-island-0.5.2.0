@@ -1,0 +1,8 @@
+The symptom: 
+The game doesn't start anymore (cause not yet identified).
+
+Fix :
+DELETE the Persistent file in these two folders (Save & AppData).
+Save folder... (Holiday Island/game/saves)
+AppData folder (C: user/***/AppData/roaming/RenPy/Island-1499865023)*** your user id
+Note : this action will remove some of the girls scene: plane girl scene and girl arrival)
