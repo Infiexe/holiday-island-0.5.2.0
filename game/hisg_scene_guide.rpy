@@ -569,6 +569,7 @@ init 900 python:
         rt["highlight"].clear()
         rt["run"] = None
         hisg_clear_cache()
+        store.g_scene_mode = False
         if run and run.get("replay"):
             store.g_replay = False
             if renpy.can_load(HISG_REPLAY_SLOT):
@@ -676,8 +677,12 @@ label hisg_run(hisg_kind, hisg_name, hisg_char, hisg_replay=False):
         call create_list_of_chars_display from _call_hisg_list
         $ hisg_after_list(hisg_char)
     $ hisg_begin(hisg_replay)
+    # Like the game's own replay: hide the people standing around while
+    # the scene plays, and redraw the location afterwards.
+    $ start_scene()
     $ renpy.call(hisg_call[0], *hisg_call[1], **hisg_call[2])
     $ hisg_finish()
+    $ stop_scene()
     return
 
 
