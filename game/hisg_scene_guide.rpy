@@ -156,7 +156,7 @@ init 900 python:
         """(attr, value) the scene needs, or None."""
         ordered = sorted(plan.conds, key=lambda c: 0 if c.data.get("op") == "==" else 1)
         for c in ordered:
-            if c.kind != "outfit" or c.data["who"] not in hisg.CHAR_NAMES:
+            if c.kind != "outfit" or not hisg.is_char_var(c.data["who"], char, store):
                 continue
             attr, op, v = c.data["attr"], c.data["op"], c.data["value"]
             cur = getattr(char, attr, 0)

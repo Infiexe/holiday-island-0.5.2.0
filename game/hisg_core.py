@@ -518,7 +518,7 @@ OUTFIT_RE = re.compile(r'^(\w+)\.(swimwear|nightwear|dinerwear|receptionwear|doc
 ALONE_RE = re.compile(r'^len\(list_of_chars_display_3\)(==|<=|<|>|>=|!=)(\d+)$')
 EFFECT_RE = re.compile(r'^player\.get_effect_state\(["\'](\w+)["\']\)(==|!=|>=|<=|>|<)(\d+)$')
 CHARLOC_RE = re.compile(r'^(\w+)\.locations\[actions_left-1\](==|!=)["\'](\w+)["\']$')
-PLOC_RE = re.compile(r'^location(==|!=)["\'](\w+)["\']$')
+PLOC_RE = re.compile(r'^(?:i_)?location\d*(==|!=)["\'](\w+)["\']$')
 QUESTCOND_RE = re.compile(r'^player\.get_quest_state\(["\']([^"\']+)["\'],(\w+)\)(==|!=|>=|<=|>|<)(-?\d+)$')
 SEEN_RE = re.compile(r'^(\w+)\.get_(scene|event|appointment)_seen\(["\']([^"\']+)["\']\)(?:(==|!=)(True|False))?$')
 SEEN_TIMES_RE = re.compile(r'^(\w+)\.get_(scene|event|appointment)_seen_times\(["\']([^"\']+)["\'][^)]*\)(==|!=|>=|<=|>|<)(\d+)$')
@@ -994,7 +994,7 @@ def build_plan(index, kind, name, char, store, meta=None, marker=None):
             if not plan.launchable:
                 plan.reason = "The label needs arguments the guide cannot provide."
             plan.notes.append("No unlock statement found in the script; the game's own replay label is used.")
-            _fill_location(plan, meta, char)
+            _fill_location(plan, meta, char, store)
             return plan
         action = getattr(meta, "scene_action", "") if meta is not None else ""
         edge = index.dispatch.get("do_" + action) if action else None
@@ -1010,10 +1010,10 @@ def build_plan(index, kind, name, char, store, meta=None, marker=None):
             plan.launchable = True
             plan.notes.append("The guide starts the activity this one belongs to; "
                               "the outcome depends on how it goes.")
-            _fill_location(plan, meta, char)
+            _fill_location(plan, meta, char, store)
             return plan
         plan.reason = "No route found in the game's script for this entry."
-        _fill_location(plan, meta, char)
+        _fill_location(plan, meta, char, store)
         return plan
 
     candidates.sort(key=lambda c: c["score"])
@@ -1026,12 +1026,17 @@ def build_plan(index, kind, name, char, store, meta=None, marker=None):
     plan.entry = best["entry"]
     plan.entry_return = best["entry_return"]
     plan.target_label = best["target_label"]
+    # The random trigger above the target is skipped, but where it takes
+    # place and what she wears still matter.
+    env_kinds = ("outfit", "char_location", "location", "alone")
+    plan.conds = [c for c in plan.skipped if c.kind in env_kinds] + plan.conds
+    plan.skipped = [c for c in plan.skipped if c.kind not in env_kinds]
     t = plan.target_idx = best["target_idx"]
     for hop in plan.hops:
         for pname, default in index.params.get(hop.label, []):
             if default is not None:
                 plan.defaults.setdefault(pname, default)
-    _fill_location(plan, meta, char)
+    _fill_location(plan, meta, char, store)
 
     if t == 0:
         args = _direct_args(index, plan.target_label)
@@ -1206,7 +1211,16 @@ def _direct_args(index, label):
     return out
 
 
-def _fill_location(plan, meta, char):
+def is_char_var(name, char, store):
+    """Does the variable name refer to `char` (char1, or e.g. alice)?"""
+    if name in CHAR_NAMES:
+        return True
+    if store is None or char is None:
+        return False
+    return getattr(store, name, None) is char
+
+
+def _fill_location(plan, meta, char, store=None):
     loc = ""
     if meta is not None:
         loc = getattr(meta, "location", "") or ""
@@ -1218,7 +1232,8 @@ def _fill_location(plan, meta, char):
         for c in plan.conds:
             if c.kind == "location" and c.data.get("op") == "==":
                 loc = c.data["location"]
-            elif c.kind == "char_location" and c.data.get("op") == "==" and c.data.get("who") in CHAR_NAMES:
+            elif c.kind == "char_location" and c.data.get("op") == "==" \
+                    and is_char_var(c.data.get("who"), char, store):
                 loc = c.data["location"]
     plan.location = loc
 
