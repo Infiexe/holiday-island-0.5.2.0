@@ -57,6 +57,24 @@ init 900 python:
                 rt["index_error"] = "%s: %s" % (e.__class__.__name__, e)
         return rt["index"]
 
+    def hisg_action_texts():
+        rt = hisg.RUNTIME
+        if rt.get("action_texts") is None:
+            try:
+                screens = sys.modules["renpy.display.screen"].screens.values()
+                rt["action_texts"] = hisg.collect_action_texts([s.ast for s in screens if getattr(s, "ast", None) is not None])
+            except Exception:
+                rt["action_texts"] = {}
+        return rt["action_texts"]
+
+    def hisg_action_text(name, char):
+        tip = hisg.action_text_for(hisg_action_texts(), name)
+        if not tip:
+            return ""
+        tip = hisg_re.sub(r"\[(\w+)\.fname\]", char.fname, tip)
+        tip = hisg_re.sub(r"\{[^}]*\}", "", tip)
+        return hisg_esc(tip)
+
     def hisg_clear_cache():
         hisg.RUNTIME["plans"].clear()
         hisg.RUNTIME["details"].clear()
@@ -239,6 +257,9 @@ init 900 python:
 
     def hisg_eval(c, char, defaults=None):
         ns = dict(defaults or {})
+        idx = hisg.RUNTIME["index"]
+        if idx is not None:
+            ns.update(hisg.step_values(idx, c, store))
         ns.update((n, char) for n in hisg.CHAR_NAMES)
         return hisg.safe_eval(c.expr, store.__dict__, ns)
 
@@ -293,6 +314,8 @@ init 900 python:
                 return "auto", t + " - forced by Guided mode", None
             return "unknown", t + u": " + hisg_esc(c.expr), None
         v, _r = hisg_eval(c, char, defaults)
+        if k == "other" and v:
+            return None  # a technical condition that is already fine
         state = "unknown" if v is None else ("ok" if v else "bad")
         if guided and state != "ok":
             state = "auto"
@@ -307,6 +330,8 @@ init 900 python:
                 link = (who, "quest", d["quest"])
         elif k == "seen":
             who = hisg_char_by_var(d["who"], char)
+            if who is char and d["name"] == hisg_current_name[0] and not d["want"]:
+                return None  # "this one is not seen yet": nothing to do
             t = u"%s %s “%s” %s" % (hisg_esc(who.fname), HISG_KIND_TEXT.get(d["what"], d["what"]),
                                            hisg_title(d["name"]), "seen" if d["want"] else "not seen yet")
             if v is False and d["want"]:
@@ -329,16 +354,64 @@ init 900 python:
             if d["action"] == "anger_block":
                 t = u"%s is not angry with you" % hisg_esc(who.fname)
             else:
-                t = u"%s hasn't refused \u201c%s\u201d recently" % (hisg_esc(who.fname), hisg_esc(d["action"].replace("_", " ")))
+                what = hisg_action_text(d["action"], who) or hisg_esc(d["action"].replace("_", " "))
+                if who is player:
+                    t = u"Your waiting time for \u201c%s\u201d is over" % what
+                else:
+                    t = u"\u201c%s\u201d is available again (no waiting time running)" % what
+        elif k == "role":
+            expr = d.get("expr", "")
+            role = expr.split(".")[-1].replace("_", " ")
+            t = u"%s has to be the %s right now (%s)" % (nm, hisg_esc(role), hisg_esc(expr))
+            if guided and v is False:
+                t = u"%s takes over as the %s" % (nm, hisg_esc(role))
+                return "auto", t, None
         elif k == "item":
             t = u"You have “%s”" % hisg_esc(d["item"])
+        elif v is None and _r.startswith("call"):
+            t = u"Decided during the scene: " + hisg_esc(c.expr)
         else:
-            t = u"Condition: " + hisg_esc(c.expr)
+            t = u"Game condition: " + hisg_esc(c.expr)
         if guided and state == "auto":
             t += u" - forced by Guided mode"
         return state, t, link
 
+    HISG_BLOCKING = hisg.PROGRESS_KINDS + ("appointment", "presence")
+
+    def hisg_appointment_ids(plan):
+        try:
+            return [a.id for a in gl_appointment_pool if plan.entry_return and a.action_event == plan.entry_return]
+        except Exception:
+            return []
+
+    def hisg_appointment_arranged(char, ids):
+        try:
+            return any(player.has_appointment(i, char) for i in ids)
+        except Exception:
+            return False
+
+    def hisg_others_involved(char, meta, plan):
+        """Other characters the scene needs (named in it or its conditions)."""
+        out = []
+        pool = list(getattr(store, "list_of_phone_characters", []))
+        desc = (getattr(meta, "description", "") or "") if meta is not None else ""
+        for other in pool:
+            if other is char or not getattr(other, "fname", ""):
+                continue
+            if hisg_re.search(r"\b%s\b" % hisg_re.escape(other.fname), desc):
+                out.append(other)
+        for c in plan.conds:
+            who = c.data.get("who")
+            if who and not hisg.is_char_var(who, char, store):
+                other = getattr(store, who, None)
+                if other in pool and other is not char and other not in out:
+                    out.append(other)
+        return out
+
+    hisg_current_name = [""]
+
     def hisg_card_data(char, kind, name):
+        hisg_current_name[0] = name
         guided = bool(persistent.hisg_guided)
         key = (char.fname, kind, name, guided, actions_left)
         cache = hisg.RUNTIME["details"]
@@ -385,6 +458,7 @@ init 900 python:
         plan = hisg_plan(char, kind, name)
         rows = []
         unmet = False
+        blocked = []
         exact = set((c.data["who"], c.data["attr"]) for c in plan.conds
                     if c.kind == "outfit" and c.data["op"] == "==")
         defaults = hisg.default_values(plan, store)
@@ -396,12 +470,38 @@ init 900 python:
                 continue
             if row[0] == "bad":
                 unmet = True
+                if c.kind in HISG_BLOCKING:
+                    blocked.append(c.kind)
             if row not in rows:
                 rows.append(row)
+
+        # Appointments are arranged by the game (a quest step or a text
+        # message); Honest mode only plays them once they are.
+        if kind == "appointment" and plan.launchable:
+            ids = hisg_appointment_ids(plan)
+            if not ids:
+                rows.insert(0, ("unknown", u"Could not check whether the appointment is arranged", None))
+            elif hisg_appointment_arranged(char, ids):
+                rows.insert(0, ("ok", u"The appointment is arranged", None))
+            elif d.get("seen"):
+                rows.insert(0, ("ok", u"Not arranged right now, but you have had it before", None))
+            elif guided:
+                rows.insert(0, ("auto", u"Not arranged yet - played anyway in Guided mode", None))
+            else:
+                rows.insert(0, ("bad", u"Not arranged yet - the game arranges it (see Trigger above)", None))
+                blocked.append("appointment")
+
+        absent = [o for o in hisg_others_involved(char, meta, plan) if not hisg_on_island(o)]
+        for other in absent:
+            rows.insert(0, ("bad", u"%s is not on the island right now" % hisg_esc(other.fname), None))
         d["rows"] = rows
         d["notes"].extend(plan.notes)
         if plan.location:
             d["where"] = u"Where: %s" % hisg_location_text(plan.location)
+        if plan.entry_return:
+            how = hisg_action_text(plan.entry_return, char)
+            if how:
+                d["how"] = u"In the game: select %s, then \u201c%s\u201d" % (hisg_esc(char.fname), how)
         if plan.skipped:
             d["notes"].append("The random trigger of this %s is skipped by the guide." % HISG_KIND_TEXT.get(kind, kind))
 
@@ -410,8 +510,12 @@ init 900 python:
             d["play_hint"] = plan.reason or "The guide cannot start this one."
         elif not on_island:
             d["play_hint"] = "%s is not on the island right now." % char.fname
+        elif absent:
+            d["play_hint"] = "%s is not on the island right now." % absent[0].fname
         elif not guided and plan.location and not hisg_location_open(plan.location):
             d["play_hint"] = "%s is closed at this time of day." % hisg_location_text(plan.location).capitalize()
+        elif not guided and blocked:
+            d["play_hint"] = "Do the steps marked with a cross first (or switch to Guided mode)."
         else:
             d["play"] = True
             if unmet:
@@ -498,6 +602,17 @@ init 900 python:
         store.location_detail = ""
         return rebuild
 
+    def hisg_set_role(expr, char):
+        """jobs.doctor -> setattr(jobs, "doctor", char) for this scene."""
+        try:
+            parts = expr.split(".")
+            obj = getattr(store, parts[0])
+            for part in parts[1:-1]:
+                obj = getattr(obj, part)
+            setattr(obj, parts[-1], char)
+        except Exception:
+            pass
+
     def hisg_setup_effects(plan):
         for c in plan.conds:
             if c.kind != "effect" or c.data["effect"] != "erection":
@@ -530,11 +645,26 @@ init 900 python:
             renpy.notify(plan.reason if plan is not None else "The game's script could not be read.")
             return None
         meta = hisg_find_meta(char, kind, name)
+        if not replay:
+            d = hisg_card_data(char, kind, name)
+            if not d["play"]:
+                renpy.notify(d["play_hint"] or "This one cannot be started right now.")
+                return None
         alone = any(c.kind == "alone" for c in plan.conds)
         rebuild = hisg_setup_env(char, plan.location, hisg_outfit_target(plan, char, meta), alone, guided)
         if guided:
             hisg_setup_effects(plan)
             rt["patcher"].force(plan.steps)
+            for c in plan.conds:
+                if c.kind == "role":
+                    hisg_set_role(c.data["expr"], char)
+        if kind == "appointment" and not replay:
+            # Played now, so it should not start again later.
+            ids = hisg_appointment_ids(plan)
+            for lst in (player.appointments_today, player.appointments_tomorrow):
+                for app in list(lst):
+                    if app.id in ids and app.with_char is char:
+                        lst.remove(app)
         for st in plan.steps:
             if st[0] == "menu":
                 rt["highlight"].setdefault(st[1].name, set()).add(st[2])
@@ -862,6 +992,8 @@ screen hisg_entry_card(hisg_char, hisg_kind, hisg_name):
                     text "{b}Requirements:{/b} " + hisg_d["requirements"] style "hisg_small"
                 if hisg_d.get("where"):
                     text hisg_d["where"] style "hisg_text"
+                if hisg_d.get("how"):
+                    text hisg_d["how"] style "hisg_text"
 
                 if hisg_d["rows"]:
                     null height 4

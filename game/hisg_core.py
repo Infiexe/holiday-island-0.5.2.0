@@ -41,6 +41,8 @@ except NameError:  # Python 3
 
 MARK_RE = re.compile(r'(\w+)\s*\.\s*add_(scene|event|appointment)_seen\(\s*["\']([^"\']+)["\']')
 QUEST_RE = re.compile(r'player\s*\.\s*(inc_quest_state|set_quest_state|add_quest)\(([^()]*(?:\([^()]*\)[^()]*)*)\)')
+ASSIGN_RE = re.compile(r'^\s*(\w+)\s*=\s*(True|False|None|-?\d+)\s*$')
+ANY_ASSIGN_RE = re.compile(r'^\s*(\w+)\s*(?:[-+*/]?=)(?!=)')
 PYCALL_RE = re.compile(r'renpy\s*\.\s*(call|jump)\(\s*["\']([\w\.]+)["\']')
 
 WEAR_ATTRS = ("swimwear", "nightwear", "dinerwear", "receptionwear", "doctorwear")
@@ -266,6 +268,7 @@ class Index(object):
         self.expr_edges = []      # [Edge] with expr set
         self.main_loop_idle = set()   # node names of "call screen main_game"
         self.dispatch = {}        # main loop action -> Edge
+        self.node_assigns = {}    # id(If/Menu node) -> flags set before it
         self.statement_count = 0
 
     # -- building ----------------------------------------------------------
@@ -288,8 +291,19 @@ class Index(object):
             self.params[name] = self._params(labels[name])
 
         for name in self.top:
-            ctx = {"owner": name, "entry": name, "entry_path": ()}
+            ctx = {"owner": name, "entry": name, "entry_path": (),
+                   "assigns": {}, "unstable": set(), "created": [], "snapshots": []}
+            self._ctx = ctx
             self._walk(labels[name].block, ctx, ())
+            # Variables changed while the label runs (counters...) cannot
+            # be known in advance.
+            for obj in ctx["created"]:
+                for var in ctx["unstable"]:
+                    obj.assigns.pop(var, None)
+            for snap in ctx["snapshots"]:
+                for var in ctx["unstable"]:
+                    snap.pop(var, None)
+        self._ctx = None
 
         # Main loop actions: "do_workout_pullups" -> call edge.
         self.dispatch = {}
@@ -355,9 +369,16 @@ class Index(object):
 
     def _walk(self, block, ctx, path):
         prev = None
+        saved_assigns = ctx["assigns"]
+        ctx["assigns"] = dict(saved_assigns)
         for node in block or []:
             self.statement_count += 1
             c = cls_name(node)
+            if c in ("If", "Menu", "While"):
+                # Flags as they are when this condition is checked.
+                snap = dict(ctx["assigns"])
+                self.node_assigns[id(node)] = snap
+                ctx["snapshots"].append(snap)
             if c == "If":
                 for i, entry in enumerate(node.entries):
                     self._walk(entry[1], ctx, path + (("if", node, i),))
@@ -382,7 +403,8 @@ class Index(object):
                 args = self._call_args(node)
                 rel = self._rel(ctx, path)
                 if getattr(node, "expression", False):
-                    self.expr_edges.append(Edge(None, ctx["entry"], rel, args, expr=text(node.label), node=node))
+                    self.expr_edges.append(self._remember(
+                        Edge(None, ctx["entry"], rel, args, expr=text(node.label), node=node)))
                 else:
                     self._add_edge(Edge(text(node.label), ctx["entry"], rel, args, node=node))
             elif c == "Jump":
@@ -403,6 +425,8 @@ class Index(object):
                 path = path + self._guards(node)
             if c not in ("Translate", "EndTranslate") and not (c == "Label" and text(node.name).startswith("_")):
                 prev = node
+        # Values set inside a block are not known after it.
+        ctx["assigns"] = saved_assigns
 
     def _guards(self, node):
         out = []
@@ -413,7 +437,15 @@ class Index(object):
                 out.append(("guard", node, i))
         return tuple(out)
 
+    def _remember(self, obj):
+        ctx = getattr(self, "_ctx", None)
+        obj.assigns = dict(ctx["assigns"]) if ctx else {}
+        if ctx:
+            ctx["created"].append(obj)
+        return obj
+
     def _add_edge(self, edge):
+        self._remember(edge)
         self.callers.setdefault(edge.target, []).append(edge)
 
     @staticmethod
@@ -438,8 +470,8 @@ class Index(object):
         owner, entry = ctx["owner"], ctx["entry"]
         for m in MARK_RE.finditer(src):
             subj, kind, name = m.group(1), m.group(2), m.group(3)
-            self.markers.setdefault((kind, name), []).append(
-                Marker(kind, name, subj, owner, entry, path, rel, node))
+            self.markers.setdefault((kind, name), []).append(self._remember(
+                Marker(kind, name, subj, owner, entry, path, rel, node)))
         for m in QUEST_RE.finditer(src):
             func, args = m.group(1), split_args(m.group(2))
             if not args:
@@ -458,11 +490,20 @@ class Index(object):
                         value = int(args[2])
                     except ValueError:
                         value = None
-            self.markers.setdefault(("quest", qname), []).append(
-                Marker("quest", qname, about, owner, entry, path, rel, node, value=value, op=op))
+            self.markers.setdefault(("quest", qname), []).append(self._remember(
+                Marker("quest", qname, about, owner, entry, path, rel, node, value=value, op=op)))
         for m in PYCALL_RE.finditer(src):
             # renpy.call("label", ...) inside Python: arguments are unknown.
             self._add_edge(Edge(m.group(2), entry, rel, [], how="python", node=node))
+        # Simple flags like "option11 = True" set before a menu.
+        for line in src.splitlines():
+            m = ASSIGN_RE.match(line)
+            if m:
+                ctx["assigns"][m.group(1)] = m.group(2)
+                continue
+            m = ANY_ASSIGN_RE.match(line)
+            if m:
+                ctx["unstable"].add(m.group(1))
 
     # -- queries -------------------------------------------------------------
 
@@ -527,6 +568,8 @@ IDENTITY_RE = re.compile(r'\b(char1|selected_char|event_char|i_char|l_char|char|
 STAT_RE = re.compile(r'\.(check_affection|check_love|check_lust|check_tease_sexual|check_anger)\(')
 SKILL_RE = re.compile(r'player\.(check_charm|check_strength|check_looks|check_hacking|check_sneaking|check_endurance)\(')
 COOLDOWN_RE = re.compile(r'^(\w+)\.get_action_allowed\(["\']([^"\']+)["\']\)(?:(==|!=)(True|False))?$')
+# Conditions about progress in the story; Honest mode never skips them.
+PROGRESS_KINDS = ("quest", "seen", "seen_times", "item", "role")
 CMP_FLIP = {"==": "!=", "!=": "==", ">=": "<", "<=": ">", ">": "<=", "<": ">="}
 
 
@@ -942,6 +985,8 @@ def _evaluate_chain(index, chain, target_idx, char, global_ns, base_ns, location
             v, reason = safe_value(src, global_ns, ns)
             if reason:
                 v = _guess_value(src, char, location)
+            elif _is_char_obj(v) and v is not char and _is_local_char_var(src) and src not in ns:
+                v = char  # a leftover value of a local variable
             if kw:
                 kwvalues[kw] = v
             else:
@@ -950,6 +995,11 @@ def _evaluate_chain(index, chain, target_idx, char, global_ns, base_ns, location
         ns = dict(base_ns)
         ns.update(bound)
     return values, kwvalues, ns
+
+
+def _is_local_char_var(src):
+    s = src.strip()
+    return bool(re.match(r"^\w+$", s)) and (s in CHAR_NAMES or s.startswith(("l_", "i_", "ll_")))
 
 
 def _guess_value(src, char, location):
@@ -1028,9 +1078,17 @@ def build_plan(index, kind, name, char, store, meta=None, marker=None):
     plan.target_label = best["target_label"]
     # The random trigger above the target is skipped, but where it takes
     # place and what she wears still matter.
-    env_kinds = ("outfit", "char_location", "location", "alone")
-    plan.conds = [c for c in plan.skipped if c.kind in env_kinds] + plan.conds
-    plan.skipped = [c for c in plan.skipped if c.kind not in env_kinds]
+    keep = ("outfit", "char_location", "location", "alone") + PROGRESS_KINDS
+    plan.conds = [c for c in plan.skipped if c.kind in keep] + plan.conds
+    plan.skipped = [c for c in plan.skipped if c.kind not in keep]
+    subj = plan.marker.subject.strip()
+    owner_params = [p for p, _d in index.params.get(plan.marker.owner, [])]
+    if subj.startswith(("l_", "ll_")) and subj not in owner_params:
+        # e.g. a contest: the game picks who takes part while it runs.
+        plan.reason = ("The game picks who takes part while the scene runs, "
+                       "so the guide cannot make sure it is %s." % (char.fname if char is not None else "her"))
+        _fill_location(plan, meta, char, store)
+        return plan
     t = plan.target_idx = best["target_idx"]
     for hop in plan.hops:
         for pname, default in index.params.get(hop.label, []):
@@ -1091,6 +1149,23 @@ def _candidate(index, mk, chain, mk_steps, char, global_ns, local_ns, store=None
     skipped = []
     for i in range(1, target_idx + 1):
         skipped.extend(per_hop[i])
+    skipped = refine_identity(skipped, global_ns, local_ns)
+    if skipped is None:
+        return None
+
+    # Labels below the target that are handed a character by an expression
+    # such as jobs.doctor: that has to be her (e.g. the nurse on duty).
+    roles = []
+    for i in range(target_idx + 1, len(chain)):
+        for arg in chain[i].edge.args:
+            kw, src = _split_kw(arg)
+            if "." not in src or "(" in src or not re.match(r"^[\w.]+$", src):
+                continue
+            v, reason = safe_value(src, global_ns, {})
+            if not reason and _is_char_obj(v):
+                rc = Cond(u"%s.id == char1.id" % src, kind="role")
+                rc.data["expr"] = src
+                roles.append(rc)
 
     conds = refine_identity(conds, global_ns, local_ns)
     if conds is None:
@@ -1117,6 +1192,7 @@ def _candidate(index, mk, chain, mk_steps, char, global_ns, local_ns, store=None
         score -= 100
         if entry_return:
             score -= 50
+    conds = roles + conds
     return {"score": score, "marker": mk, "chain": chain, "steps": steps, "conds": conds,
             "skipped": skipped, "entry": entry, "entry_return": entry_return,
             "target_label": chain[target_idx].label, "target_idx": target_idx}
@@ -1259,6 +1335,11 @@ def resolve_args(index, plan, char, store):
             v, reason = safe_value(src, global_ns, ns)
             if reason:
                 v = _guess_value(src, char, plan.location)
+            elif _is_char_obj(v) and v is not char and (
+                    (_is_local_char_var(src) and src not in ns) or "." in src):
+                # A leftover local variable, or a role like jobs.doctor:
+                # the scene is about the chosen character.
+                v = char
         if kw:
             kwvalues[kw] = v
         else:
@@ -1303,6 +1384,18 @@ def default_values(plan, store):
     return out
 
 
+def step_values(index, cond, store):
+    """Flags set by the label before the condition's statement."""
+    out = {}
+    if cond.step is None:
+        return out
+    for name, src in index.node_assigns.get(id(cond.step[1]), {}).items():
+        v, reason = safe_value(src, store.__dict__ if store is not None else {}, {})
+        if not reason:
+            out[name] = v
+    return out
+
+
 def auto_succeed_kwargs(index, plan):
     """Keyword arguments that make the target label skip its checks."""
     out = {}
@@ -1324,6 +1417,66 @@ def check_must_pass(cond):
     n = norm(cond.src)
     base = not (n.endswith("==False") or n.endswith("!=True") or n.startswith("not"))
     return base != cond.negated
+
+
+ACTION_RETURN_RE = re.compile(r'Return\(\s*["\'](do_\w+)["\']')
+ACTION_TEXT_RES = (re.compile(r'["\']0\d_([^"\']+)["\']'),
+                   re.compile(r'Action\s*\(\s*["\']([^"\']+)["\']'))
+
+
+def collect_action_texts(screen_asts):
+    """
+    Reads the game's screens for the text of each main loop action button,
+    e.g. "do_others" -> "Talk to [selected_char.fname] about other topics."
+    """
+    out = {}
+
+    def visit(node):
+        kw = getattr(node, "keyword", None) or []
+        action = tip = None
+        for name, expr in kw:
+            expr = text(expr)
+            if name == "action":
+                m = ACTION_RETURN_RE.search(expr)
+                if m:
+                    action = m.group(1)
+            elif name in ("tooltip", "hovered"):
+                for rx in ACTION_TEXT_RES:
+                    m = rx.search(expr)
+                    if m:
+                        tip = m.group(1)
+                        break
+        if action and tip:
+            tip = re.split(r"\{color|\\n", tip)[0].strip()
+            if tip and len(tip) > len(out.get(action, "")):
+                out[action] = tip
+        for child in getattr(node, "children", None) or []:
+            visit(child)
+        for entry in getattr(node, "entries", None) or []:
+            if isinstance(entry, tuple) and len(entry) == 2:
+                visit(entry[1])
+    for root in screen_asts:
+        try:
+            visit(root)
+        except Exception:
+            pass
+    return out
+
+
+def action_text_for(texts, name):
+    """Button text for a main loop action or a cooldown name."""
+    if not name:
+        return ""
+    name = name[3:] if name.startswith("do_") else name
+    parts = name.split("_")
+    candidates = []
+    for i in range(len(parts)):
+        for j in range(len(parts), i, -1):
+            candidates.append("do_" + "_".join(parts[i:j]))
+    for cand in candidates:
+        if cand in texts:
+            return texts[cand]
+    return ""
 
 
 # ---------------------------------------------------------------------------
