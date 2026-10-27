@@ -33,6 +33,10 @@ Karta pokazuje te warunki ze statusem:
 | ? | losowe albo zależne od wcześniejszego wyboru |
 | ➜ | opcja w menu, którą trzeba wybrać – w grze będzie oznaczona żółtą strzałką |
 
+Warunki są opisane zwykłymi słowami (np. „it's 17:00 or earlier (now 00:00)”, „Amy's lust at least 65
+(now 52)”, „at least 14 days since Mercedes appointment “Nightbar titfight” (now 6)”), a obok małym
+szarym drukiem jest oryginalny warunek z gry.
+
 Brakujące sceny i questy mają link „Show how to get it”, który otwiera ich kartę (np. kolejny
 krok questa z opisem z dziennika questów gry i przyciskiem „Play next step”).
 
@@ -55,5 +59,6 @@ Kafelek „Special actions” otwiera tabelkę interakcji (flash / grope / pose)
 
 - Ok. 6% wpisów nie ma drogi, którą da się odtworzyć automatycznie (np. pokazy mody w studiu,
   część eventów na basenie, eventy z dwiema postaciami naraz). Karta pokazuje wtedy hinty z gry.
-- Przy grze w pokera i podobnych aktywnościach mod uruchamia samą aktywność; wynik zależy
-  od jej przebiegu.
+- Sceny po wygranej w pokera (nagrody, rozbieranie do końca itd.) startują od intro, a potem
+  mod od razu daje Ci wygraną i pomija samą partię. Przy innych aktywnościach (np. hotshots)
+  mod uruchamia aktywność; wynik zależy od jej przebiegu.

@@ -44,6 +44,10 @@ QUEST_RE = re.compile(r'player\s*\.\s*(inc_quest_state|set_quest_state|add_quest
 LUST_RE = re.compile(r'player\s*\.\s*change_lust(?:_simple)?\(([^()]*(?:\([^()]*\)[^()]*)*)\)')
 ASSIGN_RE = re.compile(r'^\s*(\w+)\s*=\s*(True|False|None|-?\d+)\s*$')
 ANY_ASSIGN_RE = re.compile(r'^\s*(\w+)\s*(?:[-+*/]?=)(?!=)')
+TRIGGER_RE = re.compile(r'\baction_event\s*=\s*["\'](\w+)["\']')
+EVENT_CHAR_RE = re.compile(r'\bevent_char\s*=\s*([\w.]+)')
+# "event_char = miriam" before a call: who the called label is about.
+CHARVAR_RE = re.compile(r'^\s*(event_char\d*|char\d|selected_char)\s*=\s*([\w.]+)\s*$')
 SCHEDULE_RE = re.compile(r'add_appointment\(\s*(\d+)\s*,')
 MESSAGE_RES = (re.compile(r'(\w+)\s*\.\s*(?:create_message|send_message|create_text_message)\(\s*(\d+)'),
                re.compile(r'(\w+)\s*\.\s*add_action_cooldown\([^)]*i_message_text\s*=\s*(\d+)'))
@@ -261,6 +265,7 @@ class Edge(object):
         self.how = how            # call / jump / fall / python
         self.expr = expr          # "call expression": the expression
         self.node = node
+        self.charvars = {}        # character variables set before the call
 
 
 class Index(object):
@@ -303,7 +308,7 @@ class Index(object):
         for name in self.top:
             ctx = {"owner": name, "entry": name, "entry_path": (),
                    "assigns": {}, "unstable": set(), "created": [], "snapshots": [],
-                   "lust": (), "all_assigned": set()}
+                   "lust": (), "all_assigned": set(), "charvars": {}}
             self._ctx = ctx
             self._walk(labels[name].block, ctx, ())
             # Variables changed while the label runs (counters...) cannot
@@ -395,7 +400,9 @@ class Index(object):
         prev = None
         saved_assigns = ctx["assigns"]
         saved_lust = ctx["lust"]
+        saved_charvars = ctx["charvars"]
         ctx["assigns"] = dict(saved_assigns)
+        ctx["charvars"] = dict(saved_charvars)
         for node in block or []:
             self.statement_count += 1
             c = cls_name(node)
@@ -453,8 +460,10 @@ class Index(object):
             if c not in ("Translate", "EndTranslate") and not (c == "Label" and text(node.name).startswith("_")):
                 prev = node
         # Values set inside a block are not known after it.
+        ctx["pending_trigger"] = None
         ctx["assigns"] = saved_assigns
         ctx["lust"] = saved_lust
+        ctx["charvars"] = saved_charvars
 
     def _guards(self, node):
         out = []
@@ -474,6 +483,8 @@ class Index(object):
         return obj
 
     def _add_edge(self, edge):
+        if getattr(self, "_ctx", None) is not None and edge.how in ("call", "jump"):
+            edge.charvars = dict(self._ctx.get("charvars", {}))
         self._remember(edge)
         self.callers.setdefault(edge.target, []).append(edge)
 
@@ -545,8 +556,27 @@ class Index(object):
             args = split_args(m.group(1))
             if args:
                 ctx["lust"] = ctx["lust"] + (args[0],)
+        # Events started by the main loop: action_event = "event_x" (often
+        # followed by event_char = amy).
+        for m in TRIGGER_RE.finditer(src):
+            mk = self._remember(Marker("trigger", m.group(1), "", owner, entry, path, rel, node))
+            # Set just before ("event_char = amy"), or None if not known.
+            mk.event_char = ctx["charvars"].get("event_char")
+            self.markers.setdefault(("trigger", m.group(1)), []).append(mk)
+            ctx["pending_trigger"] = mk
+        m = EVENT_CHAR_RE.search(src)
+        if m and ctx.get("pending_trigger") is not None:
+            if ctx["pending_trigger"].event_char is None:
+                ctx["pending_trigger"].event_char = m.group(1)
         # Simple flags like "option11 = True" set before a menu.
         for line in src.splitlines():
+            m = CHARVAR_RE.match(line)
+            if m:
+                ctx["charvars"][m.group(1)] = m.group(2)
+            else:
+                m = ANY_ASSIGN_RE.match(line)
+                if m:
+                    ctx["charvars"].pop(m.group(1), None)
             m = ASSIGN_RE.match(line)
             if m:
                 ctx["assigns"][m.group(1)] = m.group(2)
@@ -609,7 +639,7 @@ def path_conds(steps):
 OUTFIT_RE = re.compile(r'^(\w+)\.(swimwear|nightwear|dinerwear|receptionwear|doctorwear)(==|!=|>=|<=|>|<)(\d+)$')
 ALONE_RE = re.compile(r'^len\(list_of_chars_display_3\)(==|<=|<|>|>=|!=)(\d+)$')
 EFFECT_RE = re.compile(r'^player\.get_effect_state\(["\'](\w+)["\']\)(==|!=|>=|<=|>|<)(\d+)$')
-CHARLOC_RE = re.compile(r'^(\w+)\.locations\[actions_left-1\](==|!=)["\'](\w+)["\']$')
+CHARLOC_RE = re.compile(r'^(\w+)\.locations\[actions_left-(\d+)\](==|!=)["\'](\w+)["\']$')
 PLOC_RE = re.compile(r'^(?:i_)?location\d*(==|!=)["\'](\w+)["\']$')
 QUESTCOND_RE = re.compile(r'^player\.get_quest_state\(["\']([^"\']+)["\'],(\w+)\)(==|!=|>=|<=|>|<)(-?\d+)$')
 SEEN_RE = re.compile(r'^(\w+)\.get_(scene|event|appointment)_seen\(["\']([^"\']+)["\']\)(?:(==|!=)(True|False))?$')
@@ -620,7 +650,9 @@ STAT_RE = re.compile(r'\.(check_affection|check_love|check_lust|check_tease_sexu
 SKILL_RE = re.compile(r'player\.(check_charm|check_strength|check_looks|check_hacking|check_sneaking|check_endurance)\(')
 COOLDOWN_RE = re.compile(r'^(\w+)\.get_action_allowed\(["\']([^"\']+)["\']\)(?:(==|!=)(True|False))?$')
 # Conditions about progress in the story; Honest mode never skips them.
-PROGRESS_KINDS = ("quest", "seen", "seen_times", "item", "role")
+PROGRESS_KINDS = ("quest", "seen", "seen_times", "item", "role", "time")
+ENGINE_RE = re.compile(r'\b(actions_event_checked|actions_used|g_replay|menu_active|location_old|current_action|g_scene_mode)\b')
+TIME_RE = re.compile(r'\b(actions_left|daytime|cur_weekday|gameday|get_its_raining|g_rainy_\w+|island_days|cur_time)\b')
 CMP_FLIP = {"==": "!=", "!=": "==", ">=": "<", "<=": ">", ">": "<=", "<": ">="}
 
 
@@ -654,6 +686,11 @@ def classify(cond):
     neg = cond.negated
     d = cond.data
 
+    if n.startswith("g_poker_game."):
+        # How the card game went; the guide lets the player win it.
+        cond.kind = "poker"
+        return
+
     m = OUTFIT_RE.match(n)
     if m:
         op = CMP_FLIP[m.group(3)] if neg else m.group(3)
@@ -675,11 +712,6 @@ def classify(cond):
     if m:
         cond.kind = "effect"
         d.update(effect=m.group(1), op=CMP_FLIP[m.group(2)] if neg else m.group(2), value=int(m.group(3)))
-        return
-    m = CHARLOC_RE.match(n)
-    if m:
-        cond.kind = "char_location"
-        d.update(who=m.group(1), op=CMP_FLIP[m.group(2)] if neg else m.group(2), location=m.group(3))
         return
     m = PLOC_RE.match(n)
     if m:
@@ -708,6 +740,18 @@ def classify(cond):
         d.update(who=m.group(1), what=m.group(2), name=m.group(3),
                  op=CMP_FLIP[m.group(4)] if neg else m.group(4), value=int(m.group(5)))
         return
+    if ENGINE_RE.search(n):
+        cond.kind = "dispatch"
+        return
+    m = CHARLOC_RE.match(n)
+    if m:
+        cond.kind = "char_location"
+        d.update(who=m.group(1), back=int(m.group(2) or 1), op=CMP_FLIP[m.group(3)] if neg else m.group(3),
+                 location=m.group(4))
+        return
+    if TIME_RE.search(n) and not STAT_RE.search(n) and ".locations[" not in n:
+        cond.kind = "time"
+        return
     m = COOLDOWN_RE.match(n)
     if m:
         want = m.group(4) != "False" if m.group(3) == "==" else (m.group(4) == "False" if m.group(3) else True)
@@ -733,7 +777,7 @@ def classify(cond):
     if IDENTITY_RE.search(text(cond.src)):
         cond.kind = "identity"
         return
-    if "_return" in n or "action_event" in n:
+    if "_return" in n or "action_event" in n or ENGINE_RE.search(n):
         cond.kind = "dispatch"
         return
 
@@ -878,6 +922,9 @@ class Hop(object):
         self.edge = edge          # Edge used to get here from the hop above
 
 
+POKER_WIN_LABEL = "poker_win"
+
+
 class Plan(object):
 
     def __init__(self, kind, name):
@@ -896,9 +943,15 @@ class Plan(object):
         self.steps = []           # path steps below the target label
         self.location = ""
         self.defaults = {}        # label parameter -> default value source
+        self.preset = {}          # character variables the game sets before the call
         self.launchable = False
         self.reason = ""
         self.notes = []
+
+    @property
+    def poker_win(self):
+        """The target comes after winning a poker game."""
+        return any(h.label == POKER_WIN_LABEL for h in self.hops[self.target_idx + 1:])
 
     def __repr__(self):
         return "<Plan %s %s via %s>" % (self.kind, self.name, self.target_label)
@@ -958,12 +1011,21 @@ def subject_ok(marker, char, store, index):
     if "=" in subj:
         subj = subj.split("=", 1)[1].strip()
     params = [p for p, _d in index.params.get(marker.owner, [])]
-    if subj in params or subj in CHAR_NAMES:
+    if subj in params or subj in CHAR_NAMES or re.match(r"^event_char\d*$", subj):
+        # Set by whoever starts the label (checked along the route).
         return True
     return _arg_ok(subj, char, store)
 
 
-def find_chains(index, start, char, store, global_ns, local_ns, max_depth=9, max_chains=8):
+def _edge_identity_ok(edge, global_ns, local_ns):
+    """False when the call site is only reached for another character."""
+    try:
+        return refine_identity(path_conds(edge.path), global_ns, local_ns) is not None
+    except Exception:
+        return True
+
+
+def find_chains(index, start, char, store, global_ns, local_ns, max_depth=12, max_chains=24):
     """
     Walks the call graph upwards from label `start`.
 
@@ -984,7 +1046,8 @@ def find_chains(index, start, char, store, global_ns, local_ns, max_depth=9, max
             if name == top:
                 edges.append(Edge(top, e.caller, e.path, e.args, node=e.node))
         usable = [e for e in edges
-                  if e.caller not in seen and all(_arg_ok(a, char, store) for a in e.args)]
+                  if e.caller not in seen and all(_arg_ok(a, char, store) for a in e.args)
+                  and _edge_identity_ok(e, global_ns, local_ns)]
         if top == MAIN_LOOP_LABEL or not usable or len(chain) > max_depth:
             results.append(chain)
             continue
@@ -1094,7 +1157,7 @@ def build_plan(index, kind, name, char, store, meta=None, marker=None):
             plan.call_args = args or []
             plan.launchable = args is not None
             if not plan.launchable:
-                plan.reason = "The label needs arguments the guide cannot provide."
+                plan.reason = args_reason(index, call_label)
             plan.notes.append("No unlock statement found in the script; the game's own replay label is used.")
             _fill_location(plan, meta, char, store)
             return plan
@@ -1120,6 +1183,15 @@ def build_plan(index, kind, name, char, store, meta=None, marker=None):
 
     candidates.sort(key=lambda c: c["score"])
     best = candidates[0]
+    for cand in candidates:
+        # Skip routes the game only takes for another girl (picture 501
+        # is a different picture for each of them).
+        probe = Plan(kind, name)
+        probe.marker, probe.hops = cand["marker"], cand["chain"]
+        probe.entry, probe.entry_return = cand["entry"], cand["entry_return"]
+        if _trigger_conds(index, probe, char, store, global_ns, local_ns) is not False:
+            best = cand
+            break
     plan.marker = best["marker"]
     plan.hops = best["chain"]
     plan.steps = best["steps"]
@@ -1133,6 +1205,20 @@ def build_plan(index, kind, name, char, store, meta=None, marker=None):
     keep = ("outfit", "char_location", "location", "alone") + PROGRESS_KINDS
     plan.conds = [c for c in plan.skipped if c.kind in keep] + plan.conds
     plan.skipped = [c for c in plan.skipped if c.kind not in keep]
+    trig = _trigger_conds(index, plan, char, store, global_ns, local_ns)
+    if trig is False:
+        plan.reason = "In the game this event only happens with another girl."
+        _fill_location(plan, meta, char, store)
+        return plan
+    if trig:
+        # "Not when another girl's event comes first" does not matter when
+        # the guide starts this one.
+        me = (getattr(char, "fname", "") or "").lower()
+        trig = [c for c in trig if not c.negated
+                or re.search(r"\b(%s|char1|event_char)\b" % re.escape(me or "char1"), c.src)]
+        wanted = keep + ("other", "invited")
+        plan.conds = [c for c in trig if c.kind in wanted] + plan.conds
+        plan.skipped += [c for c in trig if c.kind not in wanted]
     subj = plan.marker.subject.strip()
     owner_params = [p for p, _d in index.params.get(plan.marker.owner, [])]
     if subj.startswith(("l_", "ll_")) and subj not in owner_params:
@@ -1142,6 +1228,7 @@ def build_plan(index, kind, name, char, store, meta=None, marker=None):
         _fill_location(plan, meta, char, store)
         return plan
     t = plan.target_idx = best["target_idx"]
+    plan.preset = best.get("preset", {})
     for hop in plan.hops:
         for pname, default in index.params.get(hop.label, []):
             if default is not None:
@@ -1151,7 +1238,7 @@ def build_plan(index, kind, name, char, store, meta=None, marker=None):
     if t == 0:
         args = _direct_args(index, plan.target_label)
         if args is None:
-            plan.reason = "The label '%s' needs arguments the guide cannot provide." % plan.target_label
+            plan.reason = args_reason(index, plan.target_label)
             return plan
         plan.call_args = args
         plan.launchable = True
@@ -1167,6 +1254,66 @@ def build_plan(index, kind, name, char, store, meta=None, marker=None):
         plan.call_args = [(None, "__char__")] if index.params.get(plan.target_label) else []
     plan.launchable = True
     return plan
+
+
+def _rename_vars(src, rename):
+    return re.sub(r"\b(\w+)\b", lambda m: rename.get(m.group(1), m.group(1)) if m.start() == 0 or src[m.start() - 1] != "." else m.group(1), src)
+
+
+def _trigger_conds(index, plan, char, store, global_ns, local_ns):
+    """
+    For an event the main loop starts through action_event == "x": the
+    conditions where the game sets action_event = "x" (quest steps, days,
+    time...). Returns a list, [] when there is nothing to add, or False when
+    every place that starts it does so for another character.
+    """
+    if plan.entry != "main" or not plan.entry_return:
+        return []
+    edge = plan.hops[1].edge if len(plan.hops) > 1 else None
+    if edge is None or not any("action_event" in src for src, _n in _edge_conditions(edge)):
+        return []
+    triggers = index.markers_for("trigger", plan.entry_return)
+    if not triggers:
+        return []
+    # A scene that names its girl (daniela.add_event_seen(...)) can be
+    # started with someone else as event_char (Joy tells you about it).
+    subj = plan.marker.subject.strip().split("=", 1)[-1].strip() if plan.marker else ""
+    obj = getattr(store, subj, None) if (store is not None and subj) else None
+    fixed_subject = _is_char_obj(obj) and (getattr(obj, "fname", "") or "").lower() == subj.lower()
+    best = None
+    for tr in triggers:
+        ec = getattr(tr, "event_char", None)
+        if (ec and not fixed_subject and "." not in ec and not is_char_var(ec, char, store)
+                and not ec.startswith(("l_", "i_"))):
+            continue
+        # The label's parameters as the main loop passes them
+        # (event_check(ap, ...) is called with actions_left).
+        rename = {}
+        for e in index.callers.get(tr.owner, []):
+            if e.caller == MAIN_LOOP_LABEL and e.how == "call":
+                params = [p for p, _d in index.params.get(tr.owner, [])]
+                for pname, arg in zip(params, e.args):
+                    kw, src = _split_kw(arg)
+                    if re.match(r"^\w+$", src.strip()):
+                        rename[pname] = src.strip()
+                break
+        raw = path_conds(tr.path)
+        if rename:
+            raw = [_carry(Cond(_rename_vars(c.src, rename), c.negated, c.kind if c.kind == "choice" else None,
+                               step=c.step), c) for c in raw]
+        conds = refine_identity(raw, global_ns, local_ns)
+        if conds is None:
+            continue
+        if best is None or len(conds) < len(best):
+            best = conds
+    if best is None:
+        return False
+    out = [c for c in best if c.kind not in ("dispatch", "choice")]
+    if any("chars_invited[" in c.src for c in out):
+        # The game goes through the invited girls one by one.
+        out = [c for c in out if "chars_invited" not in c.src and not re.search(r"\bcounter\b", c.src)]
+        out.append(Cond("hisg_invited_arrived(char1)", kind="invited"))
+    return out
 
 
 def _candidate(index, mk, chain, mk_steps, char, global_ns, local_ns, store=None):
@@ -1228,6 +1375,23 @@ def _candidate(index, mk, chain, mk_steps, char, global_ns, local_ns, store=None
     conds = refine_identity(conds, global_ns, local_ns)
     if conds is None:
         return None
+    # "event_char = miriam" before calling a label about event_char: the
+    # scene is about someone else.
+    subj = mk.subject.strip().split("=", 1)[-1].strip()
+    setter = None
+    for i in range(1, len(chain)):
+        if subj in chain[i].edge.charvars:
+            setter = chain[i].edge.charvars[subj]
+    if setter is not None:
+        v, reason = safe_value(setter, global_ns, {})
+        if not reason and _is_char_obj(v) and v is not char:
+            return None
+    preset = {}
+    if chain[target_idx].edge is not None:
+        for var, src in chain[target_idx].edge.charvars.items():
+            v, reason = safe_value(src, global_ns, {})
+            if not reason and _is_char_obj(v):
+                preset[var] = src
     named_other = any(other_char_label(h.label, char, store) for h in chain[1:])
 
     entry_return = ""
@@ -1241,7 +1405,50 @@ def _candidate(index, mk, chain, mk_steps, char, global_ns, local_ns, store=None
             if m:
                 entry_return = m.group(1)
 
+    # Fixed values handed to the target label (play_poker(..., i_appointment=True)):
+    # a route that needs them to be different is impossible.
+    literal = {}
+    if chain[target_idx].edge is not None:
+        params = [p for p, _d in index.params.get(chain[target_idx].label, [])]
+        for i, arg in enumerate(chain[target_idx].edge.args):
+            kw, src = _split_kw(arg)
+            pname = kw or (params[i] if i < len(params) else None)
+            if pname and re.match(r'^(True|False|None|-?\d+|"[^"]*"|\'[^\']*\')$', src.strip()):
+                literal[pname] = safe_value(src, {}, {})[0]
+        passed = set(params[:len([a for a in chain[target_idx].edge.args if _split_kw(a)[0] is None])])
+        passed |= set(_split_kw(a)[0] for a in chain[target_idx].edge.args if _split_kw(a)[0])
+        for pname, default in index.params.get(chain[target_idx].label, []):
+            if pname not in passed and default is not None and \
+                    re.match(r'^(True|False|None|-?\d+|"[^"]*"|\'[^\']*\')$', text(default).strip()):
+                literal[pname] = safe_value(text(default), {}, {})[0]
+    if literal:
+        lns = dict(local_ns)
+        lns.update(literal)
+        for c in conds:
+            names = set(re.findall(r"\b[A-Za-z_]\w*\b", c.src))
+            if names and names <= set(literal) | {"True", "False", "None", "not", "and", "or"}:
+                v, _r = safe_eval(c.expr, {}, lns)
+                if v is False:
+                    return None
+
     score = len(chain) * 3 + len(conds) + 2 * len([c for c in conds if c.kind == "choice"])
+    for c in conds:
+        # "seen this one before": a repeat of the scene; prefer the first time.
+        if c.kind == "seen" and c.data.get("name") == mk.name and c.data.get("want"):
+            v, _r = safe_eval(c.expr, global_ns, local_ns)
+            if v is False:
+                score += 500
+    for c in conds:
+        # Prefer routes that are possible now (not "the girl from the plane
+        # on day 1-2" when it is day 20).
+        if c.kind not in ("choice", "identity", "dispatch"):
+            v, _r = safe_eval(c.expr, global_ns, local_ns)
+            if v is False:
+                score += 4
+    me = (getattr(char, "fname", "") or "").lower()
+    if me and any(me in text(h.label).lower().split("_") for h in chain[1:]):
+        # Her own version (new_arrival_event_miriam_mercedes).
+        score -= 100
     if named_other:
         # Labels are usually named after their character; prefer a route
         # that does not go through another character's label.
@@ -1253,7 +1460,8 @@ def _candidate(index, mk, chain, mk_steps, char, global_ns, local_ns, store=None
     conds = roles + conds
     return {"score": score, "marker": mk, "chain": chain, "steps": steps, "conds": conds,
             "skipped": skipped, "entry": entry, "entry_return": entry_return,
-            "target_label": chain[target_idx].label, "target_idx": target_idx}
+            "target_label": chain[target_idx].label, "target_idx": target_idx,
+            "preset": preset}
 
 
 def _step_lust(index, cond):
@@ -1391,6 +1599,8 @@ def _direct_args(index, label):
             continue
         if i == 0 or low in CHAR_NAMES:
             out.append((None, "__char__"))
+        elif "char" in low or "girl" in low:
+            out.append((None, "__other_char__"))
         elif "location" in low:
             out.append((None, "location"))
         elif "actions_left" in low or low in ("ap", "actionpoints"):
@@ -1400,6 +1610,36 @@ def _direct_args(index, label):
         else:
             return None
     return out
+
+
+def args_reason(index, label):
+    """Why a label cannot be started directly, in plain words."""
+    missing = [p for p, d in index.params.get(label, []) if d is None]
+    names = ", ".join(p.replace("l_", "").replace("_", " ") for p in missing[1:]) or "details"
+    return ("The game starts this one in the middle of another scene and hands it "
+            "details only that scene knows (%s), so it can't be started on its own. "
+            "Play it the normal way in the game." % names)
+
+
+def chars_in_label(label, char, store):
+    """
+    Girls named in a label, in order (lesbian_event_desire_jessica ->
+    [desire, jessica]). Empty when the label names fewer than two.
+    """
+    if store is None or not label:
+        return []
+    found = []
+    for tok in text(label).lower().split("_"):
+        obj = getattr(store, tok, None)
+        if _is_char_obj(obj) and obj not in found:
+            found.append(obj)
+    if len(found) < 2 or char not in found:
+        return []
+    return found
+
+
+def needs_two_girls(index, label):
+    return any(src == "__other_char__" for _k, src in (_direct_args(index, label) or []))
 
 
 def is_char_var(name, char, store):
@@ -1441,9 +1681,14 @@ def resolve_args(index, plan, char, store):
         _v, _kw, ns = _evaluate_chain(index, plan.hops, plan.target_idx - 1, char,
                                       global_ns, ns, plan.location)
     values, kwvalues = [], {}
+    girls = chars_in_label(plan.target_label, char, store)
     for kw, src in plan.call_args:
         if src == "__char__":
-            v = char
+            v = girls[0] if girls else char
+        elif src == "__other_char__" or (re.match(r"^\w*char\w*2$", src.strip()) and src.strip() not in CHAR_NAMES):
+            others = [g for g in girls[1:]] if girls else []
+            v = others.pop(0) if others else None
+            girls = [girls[0]] + others if girls else girls
         elif src == "__return__":
             v = ret
         else:
@@ -1496,6 +1741,12 @@ def default_values(plan, store):
         v, reason = safe_value(src, store.__dict__ if store is not None else {}, {})
         if not reason:
             out[pname] = v
+    # Keyword arguments the guide passes (play_poker(..., i_appointment=True)).
+    for kw, src in plan.call_args:
+        if kw:
+            v, reason = safe_value(src, store.__dict__ if store is not None else {}, {})
+            if not reason:
+                out[kw] = v
     return out
 
 
@@ -1528,7 +1779,7 @@ def auto_succeed_kwargs(index, plan):
     """Keyword arguments that make the target label skip its checks."""
     out = {}
     for pname, default in index.params.get(plan.target_label, []):
-        if "auto_succeed" in pname.lower() and default is not None:
+        if ("auto_succeed" in pname.lower() or "auto_success" in pname.lower()) and default is not None:
             out[pname] = True
     return out
 
