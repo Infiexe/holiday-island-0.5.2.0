@@ -1,133 +1,21 @@
-Tue Oct 27 16:04:27 2026
+Wed Oct 28 00:52:36 2026
 Windows-10-10.0.26100
 Ren'Py 7.4.4.1439
  
 
-Bootstrap to the start of init.init took 0.04s
-Early init took 0.00s
-Loader init took 0.06s
-Loading error handling took 0.19s
-Loading script took 2.90s
-Loading save slot metadata. took 1.51s
-Loading persistent took 0.06s
-Importing _renpysteam: ImportError('No module named _renpysteam',)
-Set script version to: (7, 4, 4)
-Running init code took 0.36s
-Loading analysis data took 0.21s
-Analyze and compile ATL took 0.13s
-Index archives took 0.00s
-Dump and make backups. took 0.00s
-Cleaning cache took 0.00s
-Making clean stores took 0.00s
-Initial gc. took 0.49s
-DPI scale factor: 1.000000
-nvdrs: Loaded, about to disable thread optimizations.
-nvdrs: Disabled thread optimizations.
-Creating interface object took 0.15s
-Cleaning stores took 0.00s
-Init translation took 0.47s
-Build styles took 0.00s
-Load screen analysis took 0.12s
-Analyze screens took 0.00s
-Save screen analysis took 0.00s
-Prepare screens took 0.26s
-Save pyanalysis. took 0.00s
-Save bytecode. took 0.00s
-Running _start took 0.01s
-Performance test:
-Interface start took 0.56s
-
-Initializing gl renderer:
-primary display bounds: (0, 0, 2560, 1440)
-swap interval: 1 frames
-Windowed mode.
-Vendor: 'NVIDIA Corporation'
-Renderer: 'NVIDIA GeForce RTX 5070 Ti/PCIe/SSE2'
-Version: '4.6.0 NVIDIA 617.42'
-Display Info: None
-Number of texture units: 32
-Using shader environment.
-Using FBO RTT.
-Root FBO is: 0
-FBO Maximum Texture Size: 2048
-Using gl renderer.
-Texture testing:
-- Hardware max texture size: 32768
-- 64px textures work.
-- 128px textures work.
-- 256px textures work.
-- 512px textures work.
-- 1024px textures work.
-- 2048px textures work.
-Screen sizes: virtual=(1280, 720) physical=(1739, 978) drawable=(1739, 978)
-Root FBO is: 0
-FBO Maximum Texture Size: 2048
-Total time until interface ready: 8.48873496056s
-Screen sizes: virtual=(1280, 720) physical=(2560, 1369) drawable=(2560, 1369)
-Root FBO is: 0
-FBO Maximum Texture Size: 2048
-
-Full traceback:
-  File "script.rpyc", line 468, in script
-  File "renpy/ast.py", line 1969, in execute
-    self.call("execute")
-  File "renpy/ast.py", line 1957, in call
-    return renpy.statements.call(method, parsed, *args, **kwargs)
-  File "renpy/statements.py", line 278, in call
-    return method(parsed, *args, **kwargs)
-  File "renpy/common/000statements.rpy", line 570, in execute_call_screen
-    store._return = renpy.call_screen(name, *args, **kwargs)
-  File "renpy/exports.py", line 2983, in call_screen
-    rv = renpy.ui.interact(mouse="screen", type="screen", roll_forward=roll_forward)
-  File "renpy/ui.py", line 298, in interact
-    rv = renpy.game.interface.interact(roll_forward=roll_forward, **kwargs)
-  File "renpy/display/core.py", line 3101, in interact
-    repeat, rv = self.interact_core(preloads=preloads, trans_pause=trans_pause, pause=pause, pause_start=pause_start, **kwargs)
-  File "renpy/display/core.py", line 3512, in interact_core
-    root_widget.visit_all(lambda i : i.per_interact())
-  File "renpy/display/core.py", line 567, in visit_all
-    d.visit_all(callback, seen)
-  File "renpy/display/core.py", line 567, in visit_all
-    d.visit_all(callback, seen)
-  File "renpy/display/core.py", line 567, in visit_all
-    d.visit_all(callback, seen)
-  File "renpy/display/screen.py", line 432, in visit_all
-    callback(self)
-  File "renpy/display/core.py", line 3512, in <lambda>
-    root_widget.visit_all(lambda i : i.per_interact())
-  File "renpy/display/screen.py", line 443, in per_interact
-    self.update()
-  File "renpy/display/screen.py", line 631, in update
-    self.screen.function(**self.scope)
-  File "game/gui_screens.rpy", line 3103, in execute
-  File "game/gui_screens.rpy", line 3103, in execute
-  File "game/gui_screens.rpy", line 3108, in execute
-  File "game/gui_screens.rpy", line 3116, in execute
-  File "game/gui_screens.rpy", line 3119, in execute
-  File "game/gui_screens.rpy", line 516, in execute
-  File "game/gui_screens.rpy", line 516, in execute
-  File "game/gui_screens.rpy", line 522, in execute
-  File "game/gui_screens.rpy", line 527, in execute
-  File "game/gui_screens.rpy", line 528, in execute
-  File "game/gui_screens.rpy", line 528, in <module>
-  File "renpy/exports.py", line 2347, in image_size
-    surf = im.load()
-  File "renpy/display/im.py", line 688, in load
-    raise e
-Exception: Couldn't find file 'images_webp.rpa'.
-
-While running game code:
-  File "renpy/common/000statements.rpy", line 570, in execute_call_screen
-    store._return = renpy.call_screen(name, *args, **kwargs)
-  File "game/gui_screens.rpy", line 3103, in execute
-  File "game/gui_screens.rpy", line 3103, in execute
-  File "game/gui_screens.rpy", line 3108, in execute
-  File "game/gui_screens.rpy", line 3116, in execute
-  File "game/gui_screens.rpy", line 3119, in execute
-  File "game/gui_screens.rpy", line 516, in execute
-  File "game/gui_screens.rpy", line 516, in execute
-  File "game/gui_screens.rpy", line 522, in execute
-  File "game/gui_screens.rpy", line 527, in execute
-  File "game/gui_screens.rpy", line 528, in execute
-  File "game/gui_screens.rpy", line 528, in <module>
-Exception: Couldn't find file 'images_webp.rpa'.
+  Unpacking "images_jpg.rpa" archive.
+  Unpacking "images_png.rpa" archive.
+  Unpacking "images_webp.rpa" archive.
+  Unpacking "movies_ogv.rpa" archive.
+  Unpacking "movies_webm.rpa" archive.
+  Unpacking "scripts.rpa" archive.
+  Unpacking "sounds.rpa" archive.
+  All archives unpacked.
+  Archive companion_mod.rpa has been deleted.
+  Archive images_jpg.rpa has been deleted.
+  Archive images_png.rpa has been deleted.
+  Archive images_webp.rpa has been deleted.
+  Archive movies_ogv.rpa has been deleted.
+  Archive movies_webm.rpa has been deleted.
+  Archive scripts.rpa has been deleted.
+  Archive sounds.rpa has been deleted.
