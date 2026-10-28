@@ -540,6 +540,64 @@ init 900 python:
 
     HISG_FLIP = {"Eq": "NotEq", "NotEq": "Eq", "Lt": "GtE", "GtE": "Lt", "Gt": "LtE", "LtE": "Gt"}
 
+    HISG_ATTR_TEXT = {
+        "times_send_home": (u"has been sent home", u"time"),
+        "island_days": (u"has been on the island for", u"day"),
+        "times_used": (u"has been used", u"time"),
+        "sexiness": (u"has sexiness", u""),
+        "strength": (u"has strength", u""),
+        "breast_size": (u"has breast size", u""),
+    }
+
+    def hisg_count(op, v, unit):
+        """"at least 2 times", "more than once", "never"."""
+        def num(x):
+            if not unit:
+                return u"%s" % x
+            if unit == u"time":
+                return {0: u"never", 1: u"once", 2: u"twice"}.get(x, u"%s times" % x)
+            return u"%s %s%s" % (x, unit, u"" if x == 1 else u"s")
+        if op == "Eq":
+            return u"exactly " + num(v) if v else num(v)
+        if op == "NotEq":
+            return u"not " + (u"exactly " + num(v) if v else num(v))
+        if op == "GtE":
+            return u"at least once" if (v == 1 and unit == u"time") else u"at least " + num(v)
+        if op == "Gt":
+            return u"at least once" if (v == 0 and unit == u"time") else u"more than " + num(v)
+        if op == "LtE":
+            return u"never" if (v == 0 and unit == u"time") else u"at most " + num(v)
+        if op == "Lt":
+            return u"never" if (v == 1 and unit == u"time") else u"fewer than " + num(v)
+        return None
+
+    def hisg_attr_words(n, neg, char):
+        """char.times_send_home > 0 -> "Eva has been sent home at least once (now 0)"."""
+        op = n.ops[0].__class__.__name__
+        if neg:
+            op = HISG_FLIP.get(op, op)
+        left = hisg.unparse(n.left)
+        m = hisg_re.match(r"^(\w+)\.(\w+)$", left)
+        if not m:
+            return None
+        who = hisg_char_by_var(m.group(1), char)
+        if not hasattr(who, "fname"):
+            return None
+        try:
+            v = eval(hisg.unparse(n.comparators[0]), {}, {})
+            now = getattr(who, m.group(2))
+        except Exception:
+            return None
+        if isinstance(v, bool) or not isinstance(v, int) or not isinstance(now, (int, float)):
+            return None
+        verb, unit = HISG_ATTR_TEXT.get(m.group(2), (u"has %s" % m.group(2).replace("_", " "), u""))
+        need = hisg_count(op, v, unit)
+        if not need:
+            return None
+        if unit == u"time":
+            return u"%s %s %s (now %s)" % (hisg_esc(who.fname), verb, need, hisg_count("Eq", int(now), unit))
+        return u"%s %s %s (now %s)" % (hisg_esc(who.fname), verb, need, now)
+
     def hisg_seen_words(n, neg, char):
         """x.get_scene_seen("Name") == False -> "Amy has not seen scene “Name” yet"."""
         cn = n.__class__.__name__
@@ -665,6 +723,10 @@ init 900 python:
         seen = hisg_seen_words(n, neg, char)
         if seen:
             return seen
+        if cn == "Compare" and len(n.ops) == 1:
+            attr = hisg_attr_words(n, neg, char)
+            if attr:
+                return attr
         if cn == "UnaryOp":
             return None
         if cn == "Call" and hisg.unparse(n).startswith("get_its_raining("):
@@ -743,7 +805,7 @@ init 900 python:
         if op == "!=" and value == 0:
             return u"at least once"
         if op == "!=":
-            return u"not exactly " + n(value)
+            return u"other than " + n(value)
         if op == ">=":
             return u"at least " + n(value)
         if op == ">":
