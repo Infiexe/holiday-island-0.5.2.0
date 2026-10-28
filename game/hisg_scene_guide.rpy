@@ -475,20 +475,30 @@ init 900 python:
             skill, u"" if must else u" has to fail", int(round(p * 100)), skill, cur, need)
         return what + hisg_engine(c), p
 
-    def hisg_rand_p(n):
-        """renpy.random.randint(1, 100) >= 66 -> 0.35"""
+    def hisg_rand_p(n, ns=None):
+        """renpy.random.randint(1, 100) >= 66 -> 0.35; random() < 0.3 -> 0.3"""
         if n.__class__.__name__ != "Compare" or len(n.ops) != 1:
             return None
         left, right = n.left, n.comparators[0]
         op = n.ops[0].__class__.__name__
         flip = {"Lt": "Gt", "Gt": "Lt", "LtE": "GtE", "GtE": "LtE"}
-        if "randint(" not in hisg.unparse(left):
-            if "randint(" not in hisg.unparse(right):
+        rand = lambda x: ("randint(" in hisg.unparse(x) or hisg.unparse(x).endswith("random.random()"))
+        if not rand(left):
+            if not rand(right):
                 return None
             left, right, op = right, left, flip.get(op, op)
+
+        def value(x):
+            # Plain numbers, or a value the scene was given (i_cheat_probability).
+            v, _r = hisg.safe_value(hisg.unparse(x), store.__dict__, ns or {})
+            if _r:
+                raise ValueError(_r)
+            return v
         try:
-            a, b = [eval(hisg.unparse(x), {}, {}) for x in left.args[:2]]
-            v = eval(hisg.unparse(right), {}, {})
+            v = value(right)
+            if hisg.unparse(left).endswith("random.random()"):
+                return max(0.0, min(1.0, {"Lt": v, "LtE": v, "Gt": 1 - v, "GtE": 1 - v}[op]))
+            a, b = [int(value(x)) for x in left.args[:2]]
         except Exception:
             return None
         test = {"Eq": lambda x: x == v, "NotEq": lambda x: x != v, "Lt": lambda x: x < v,
@@ -497,16 +507,16 @@ init 900 python:
             return None
         return len([x for x in range(a, b + 1) if test(x)]) / float(b - a + 1)
 
-    def hisg_chance_words(n, neg, char):
+    def hisg_chance_words(n, neg, char, ns=None):
         cn = n.__class__.__name__
         if cn == "UnaryOp" and n.op.__class__.__name__ == "Not":
-            return hisg_chance_words(n.operand, not neg, char)
-        p = hisg_rand_p(n)
+            return hisg_chance_words(n.operand, not neg, char, ns)
+        p = hisg_rand_p(n, ns)
         if p is not None:
             return u"%d%% chance" % int(round((1.0 - p if neg else p) * 100))
         if cn == "BoolOp":
             is_and = n.op.__class__.__name__ == "And"
-            parts = [hisg_chance_words(v, neg, char) for v in n.values]
+            parts = [hisg_chance_words(v, neg, char, ns) for v in n.values]
             if any(x is None for x in parts):
                 return None
             joiner = u", only if " if (is_and != neg) else u", or always if "
@@ -516,15 +526,17 @@ init 900 python:
             return out
         return hisg_words(n, neg, char)
 
-    def hisg_chance_text(c, char):
+    def hisg_chance_text(c, char, defaults=None):
+        ns = dict(defaults or {})
+        ns.update((n, char) for n in hisg.CHAR_NAMES)
         try:
             tree = hisg.pyast.parse(c.src.replace("<>", "!="), mode="eval").body
-            words = hisg_chance_words(tree, c.negated, char)
+            words = hisg_chance_words(tree, c.negated, char, ns)
         except Exception:
             words = None
         if words:
             return u"Random: " + words + hisg_engine(c)
-        return u"Random chance" + hisg_engine(c)
+        return u"Random: the chance depends on the scene" + hisg_engine(c)
 
     HISG_FLIP = {"Eq": "NotEq", "NotEq": "Eq", "Lt": "GtE", "GtE": "Lt", "Gt": "LtE", "LtE": "Gt"}
 
@@ -811,7 +823,7 @@ init 900 python:
             return "auto", u"You are alone with %s - the guide sends the others away" % nm, None
         if k == "company":
             return "unknown", u"Someone else has to be there too", None
-        m = hisg_re.match(r"""^\s*(?:i_name|i_item_name|l_item_name)\s*==\s*["'](.+)["']\s*$""", c.src)
+        m = hisg_re.match(r"""^\s*(?:i_name|i_item_name|l_item_name|l_gift_name|i_gift|l_gift|l_item)\s*==\s*["'](.+)["']\s*$""", c.src)
         if m and k == "other":
             # The present you pick from your bag.
             if c.negated:
@@ -868,7 +880,7 @@ init 900 python:
                 return "bad", t, None
             return "unknown", t, None
         if k == "chance":
-            t = hisg_chance_text(c, char)
+            t = hisg_chance_text(c, char, defaults)
             if guided:
                 return "auto", t + u" - Guided mode makes it go your way", None
             return "unknown", t, None
@@ -1213,6 +1225,8 @@ init 900 python:
                 rows.insert(0, ("bad", u"Not arranged yet - the game arranges it", hisg_arrange_link(char, ids)))
                 blocked.append("appointment")
 
+        if plan.launchable and plan.pick:
+            rows.insert(0, ("auto", u"%s takes part - the guide makes sure the game's draw picks her" % hisg_esc(char.fname), None))
         orow = hisg_outfit_row(char, meta, plan, guided)
         if orow is not None:
             rows.insert(0, orow)
@@ -1439,6 +1453,52 @@ init 900 python:
 
     # -- special actions (flash / grope / pose) -----------------------------
 
+    # Where a work outfit is worn: location, outfit attribute, who is on duty.
+    HISG_WORK_PLACES = {"reception": ("reception", "receptionwear", "reception"),
+                        "doctor": ("doctor", "doctorwear", "doctor"),
+                        "restaurant_table": ("restaurant", None, None)}
+    HISG_WORK_TEXT = {"reception": "at the reception desk", "doctor": "as the nurse on duty",
+                      "restaurant_table": "at your restaurant table"}
+
+    def hisg_table_of(value):
+        """Her seat for the restaurant_table<value> pictures (tables 1-3, 4-6, 7-9)."""
+        return (int(value) - 1) * 3 + 1 if value else 1
+
+    def hisg_work_reason(char, info, guided):
+        """Why this can't be played right now ("" when it can)."""
+        if not hisg_on_island(char):
+            return "%s is not on the island right now." % char.fname
+        if guided:
+            return ""
+        group = info["work"]
+        if group == "restaurant_table":
+            try:
+                ok = (char.get_restaurant_table() == str(info["value"]) and getattr(char, "restaurant", 0)
+                      and char.locations[actions_left - 1] == "restaurant" and hisg_location_open("restaurant"))
+            except Exception:
+                ok = False
+            if not ok:
+                return "Only while she sits at your table in the restaurant (Honest mode)."
+            return ""
+        on_duty = getattr(jobs, info["role"], None)
+        if on_duty is not char:
+            return "Only while she is on duty %s - now it's %s (Honest mode)." % (
+                HISG_WORK_TEXT[group].replace("as the nurse on duty", "as the nurse").replace("at the reception desk", "at the reception"),
+                getattr(on_duty, "fname", "nobody"))
+        if not hisg_location_open(info["location"]):
+            return "%s is closed at this time of day." % hisg_location_text(info["location"]).capitalize()
+        if getattr(char, info["work_attr"], None) != info["value"]:
+            return "She wears a different work outfit right now (Honest mode)."
+        return ""
+
+    def hisg_temp_set(obj, attr, value):
+        """Changed for this scene only (put back afterwards, see hisg_roles_restore)."""
+        try:
+            hisg.RUNTIME.setdefault("roles", []).append((obj, attr, getattr(obj, attr), value))
+            setattr(obj, attr, value)
+        except Exception:
+            pass
+
     def hisg_special_info(char, i):
         info = {"launchable": False, "reason": "", "label": None, "location": "", "attr": None,
                 "value": 0, "title": "", "seen": False, "times": 0}
@@ -1461,11 +1521,25 @@ init 900 python:
         elif group == "night":
             info["location"] = "nightbar"
             info["attr"], info["value"] = "nightwear", value
+        elif group in HISG_WORK_PLACES:
+            # At work (reception, doctor's office) or at your restaurant table:
+            # the same scenes, told where they happen.
+            place, attr, role = HISG_WORK_PLACES[group]
+            info["location"], info["work"], info["role"] = place, group, role
+            info["work_attr"], info["value"] = attr, value
+            if group == "restaurant_table":
+                info["label"] = label if sa.special_type == "F" else label + "_restaurant_table"
+                info["args"] = [char, "restaurant_table"] if sa.special_type == "F" else [char]
         else:
-            info["reason"] = "Only possible at %s; do it there in the game." % group.replace("_", " ")
-        outfit = hisg_wear_name(info["attr"], value) if info["attr"] else group.replace("_", " ")
+            info["reason"] = "The guide doesn't know where this one happens."
+        outfit = hisg_wear_name(info["attr"], value) if info["attr"] else HISG_WORK_TEXT.get(group, group.replace("_", " "))
+        if info.get("work") and info.get("work_attr"):
+            outfit += u" (work outfit %s)" % (value + 1)
         info["title"] = u"%s - %s" % (tname, outfit)
-        if label and info["location"] and not info["reason"]:
+        if label and info.get("work") and not info["reason"]:
+            info["reason"] = hisg_work_reason(char, info, bool(persistent.hisg_guided))
+            info["launchable"] = not info["reason"]
+        elif label and info["location"] and not info["reason"]:
             if not hisg_on_island(char):
                 info["reason"] = "%s is not on the island right now." % char.fname
             elif not persistent.hisg_guided and not hisg_location_open(info["location"]):
@@ -1579,6 +1653,7 @@ init 900 python:
             return None
         rt["replay_ok"] = False
         rt["background"] = []
+        hisg_pick_remove()
         hisg_roles_restore()
         rt["patcher"].restore()
         rt["highlight"].clear()
@@ -1587,6 +1662,19 @@ init 900 python:
             if not info["launchable"] and not replay:
                 renpy.notify(info["reason"] or "This interaction cannot be started.")
                 return None
+            if info.get("work"):
+                rebuild = hisg_setup_env(char, info["location"], None, True, guided)
+                if info["role"]:
+                    hisg_temp_set(jobs, info["role"], char)
+                    if info["role"] == "reception":
+                        hisg_temp_set(store, "g_receptionist_location", "reception")
+                if info["work_attr"]:
+                    hisg_temp_set(char, info["work_attr"], info["value"])
+                if info["work"] == "restaurant_table" and char.get_restaurant_table() != str(info["value"]):
+                    hisg_temp_set(char, "restaurant", hisg_table_of(info["value"]))
+                args = info.get("args") or [char, info["location"]]
+                kwargs = {"auto_succeed": guided} if len(args) > 1 else {}
+                return (info["label"], args, kwargs, rebuild)
             rebuild = hisg_setup_env(char, info["location"], (info["attr"], info["value"]), True, guided)
             return (info["label"], [char, info["location"]], {"auto_succeed": guided}, rebuild)
 
@@ -1618,7 +1706,7 @@ init 900 python:
                     pass
         if guided:
             hisg_setup_effects(plan)
-            rt["patcher"].force(plan.steps)
+            rt["patcher"].force(hisg.forceable_steps(hisg_index(), plan.steps))
             for c in plan.conds:
                 if c.kind == "role":
                     hisg_set_role(c.data["expr"], char)
@@ -1638,6 +1726,8 @@ init 900 python:
             kwvalues.update(hisg.auto_succeed_kwargs(hisg_index(), plan))
         if plan.poker_win:
             hisg_poker_shortcut(True)
+        if plan.pick:
+            hisg_pick_install(char)
         return (plan.target_label, values, kwvalues, rebuild)
 
     def hisg_after_list(char):
@@ -1660,6 +1750,33 @@ init 900 python:
             store.g_replay = True
 
     # -- poker: scenes after a won game skip the card game itself ----------
+
+    # -- contests: the game draws who takes part; make the draw pick her ---
+
+    def hisg_pick_install(char):
+        rng = renpy.python.rng
+        rt = hisg.RUNTIME
+        hisg_pick_remove()
+        rt["pick_char"], rt["pick_done"] = char, False
+        original = rng.choice
+
+        def choice(seq):
+            target = rt.get("pick_char")
+            if target is not None and not rt.get("pick_done"):
+                try:
+                    if target in seq:
+                        rt["pick_done"] = True
+                        return target
+                except Exception:
+                    pass
+            return original(seq)
+        rng.choice = choice
+
+    def hisg_pick_remove():
+        rng = renpy.python.rng
+        if "choice" in rng.__dict__:
+            del rng.__dict__["choice"]
+        hisg.RUNTIME["pick_char"] = None
 
     def hisg_poker_shortcut(on):
         if on:
@@ -1709,6 +1826,7 @@ init 900 python:
         rt = hisg.RUNTIME
         run = rt["run"]
         hisg_poker_shortcut(False)
+        hisg_pick_remove()
         hisg_roles_restore()
         rt["patcher"].restore()
         rt["highlight"].clear()

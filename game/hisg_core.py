@@ -39,7 +39,7 @@ except NameError:  # Python 3
 # Constants
 # ---------------------------------------------------------------------------
 
-MARK_RE = re.compile(r'(\w+)\s*\.\s*add_(scene|event|appointment)_seen\(\s*["\']([^"\']+)["\']')
+MARK_RE = re.compile(r'(\w+(?:\[\w*\])?)\s*\.\s*add_(scene|event|appointment)_seen\(\s*["\']([^"\']+)["\']')
 QUEST_RE = re.compile(r'player\s*\.\s*(inc_quest_state|set_quest_state|add_quest)\(([^()]*(?:\([^()]*\)[^()]*)*)\)')
 LUST_RE = re.compile(r'player\s*\.\s*change_lust(?:_simple)?\(([^()]*(?:\([^()]*\)[^()]*)*)\)')
 ASSIGN_RE = re.compile(r'^\s*(\w+)\s*=\s*(True|False|None|-?\d+)\s*$')
@@ -963,6 +963,7 @@ class Plan(object):
         self.defaults = {}        # label parameter -> default value source
         self.preset = {}          # character variables the game sets before the call
         self.background = []      # Scene statements the caller shows before the target
+        self.pick = ""            # variable the game fills with a random draw (contests)
         self.launchable = False
         self.reason = ""
         self.notes = []
@@ -1030,6 +1031,11 @@ def subject_ok(marker, char, store, index):
     if "=" in subj:
         subj = subj.split("=", 1)[1].strip()
     params = [p for p, _d in index.params.get(marker.owner, [])]
+    if subj.startswith("l_") and subj not in params and store is not None:
+        named = fixed_local_char(index, marker.owner, subj)
+        obj = getattr(store, named, None) if named else None
+        if _is_char_obj(obj) and (obj.fname or "").lower() == named:
+            return obj is char  # l_moderator = jennifer: only about Jennifer
     if subj in params or subj in CHAR_NAMES or re.match(r"^event_char\d*$", subj):
         # Set by whoever starts the label (checked along the route).
         return True
@@ -1067,6 +1073,80 @@ def _names_other_girl(src, char, store):
             if w in names and w != getattr(char, "fname", None) and not re.search(r"\b%s\b" % names[w], src):
                 return True
     return False
+
+
+def _label_sources(index, label):
+    """Python statements anywhere in a label (cached)."""
+    cache = index.__dict__.setdefault("_label_src_cache", {})
+    if label in cache:
+        return cache[label]
+    out, seen = [], set()
+
+    def walk(block):
+        for node in block or []:
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            code = getattr(node, "code", None)
+            if code is not None:
+                out.append(text(getattr(code, "source", code)))
+            walk(getattr(node, "block", None))
+            for entry in getattr(node, "entries", None) or []:
+                if isinstance(entry, (tuple, list)) and len(entry) == 2:
+                    walk(entry[1])
+            for item in getattr(node, "items", None) or []:
+                if isinstance(item, (tuple, list)) and len(item) == 3:
+                    walk(item[2])
+    node = index.labels.get(label)
+    if node is not None:
+        walk(node.block)
+    cache[label] = out
+    return out
+
+
+def fixed_local_char(index, label, var):
+    """l_moderator = jennifer in the label: the name it is set to, else None."""
+    rx = re.compile(r"^\s*%s\s*=\s*([a-z]+)\s*$" % re.escape(var), re.M)
+    for src in _label_sources(index, label):
+        m = rx.search(src)
+        if m:
+            return m.group(1)
+    return None
+
+
+def random_pick(index, label, var):
+    """Does the label set `var` by drawing a girl (var = renpy.random.choice(...))?
+    For list_round1A[counter]: is the list filled with drawn girls?"""
+    m = re.match(r"^(\w+)\[", var)
+    if m:
+        srcs = "\n".join(_label_sources(index, label))
+        for item in re.findall(r"\b%s\.append\(\s*(\w+)\s*\)" % re.escape(m.group(1)), srcs):
+            if item != var and random_pick(index, label, item):
+                return True
+        return False
+    rx = re.compile(r"\b%s\s*=\s*renpy\.random\.choice\(" % re.escape(var))
+    seen = set()
+
+    def walk(block):
+        for node in block or []:
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            code = getattr(node, "code", None)
+            if code is not None and rx.search(text(getattr(code, "source", code))):
+                return True
+            for attr in ("block",):
+                if walk(getattr(node, attr, None)):
+                    return True
+            for entry in getattr(node, "entries", None) or []:
+                if isinstance(entry, (tuple, list)) and len(entry) == 2 and walk(entry[1]):
+                    return True
+            for item in getattr(node, "items", None) or []:
+                if isinstance(item, (tuple, list)) and len(item) == 3 and walk(item[2]):
+                    return True
+        return False
+    node = index.labels.get(label)
+    return bool(node is not None and walk(node.block))
 
 
 def _edge_identity_ok(edge, global_ns, local_ns):
@@ -1282,12 +1362,15 @@ def build_plan(index, kind, name, char, store, meta=None, marker=None):
         plan.skipped += [c for c in trig if c.kind not in wanted]
     subj = plan.marker.subject.strip()
     owner_params = [p for p, _d in index.params.get(plan.marker.owner, [])]
-    if subj.startswith(("l_", "ll_")) and subj not in owner_params:
+    if (subj.startswith(("l_", "ll_")) or re.match(r"^\w+\[", subj)) and subj not in owner_params:
         # e.g. a contest: the game picks who takes part while it runs.
-        plan.reason = ("The game picks who takes part while the scene runs, "
-                       "so the guide cannot make sure it is %s." % (char.fname if char is not None else "her"))
-        _fill_location(plan, meta, char, store)
-        return plan
+        if random_pick(index, plan.marker.owner, subj):
+            plan.pick = subj  # the guide makes the draw pick her
+        else:
+            plan.reason = ("The game picks who takes part while the scene runs, "
+                           "so the guide cannot make sure it is %s." % (char.fname if char is not None else "her"))
+            _fill_location(plan, meta, char, store)
+            return plan
     t = plan.target_idx = best["target_idx"]
     plan.preset = best.get("preset", {})
     if t >= 2 and plan.hops[t].edge is not None:
@@ -1834,6 +1917,28 @@ def step_values(index, cond, store):
         v, reason = safe_value(src, store.__dict__ if store is not None else {}, {})
         if not reason:
             out[name] = v
+    return out
+
+
+def forceable_steps(index, steps):
+    """
+    Steps Guided mode may force. An if that reads what the scene itself
+    sets up (the list of contest girls, a counter) is left alone: forcing
+    it would break the scene (drawing from an empty list).
+    """
+    out = []
+    for st in steps:
+        kind, node, i = st
+        if kind in ("if", "guard"):
+            try:
+                src = " ".join(text(e[0]) for e in node.entries[:i + 1])
+            except Exception:
+                src = ""
+            # Lists and counters the scene builds (a roll's result such as
+            # l_bet_won may still be forced).
+            if re.search(r"\blen\(|\bcounter\b|\blist_\w+|\w\[\w*\]\.", src):
+                continue
+        out.append(st)
     return out
 
 
