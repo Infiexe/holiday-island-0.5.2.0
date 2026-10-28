@@ -2008,7 +2008,8 @@ class Patcher(object):
             srcs = [text(e[0]) for e in node.entries[:idx + 1]]
         except Exception:
             return False
-        return any("renpy.has_label" in s or "renpy.loadable" in s for s in srcs)
+        # Poker: the guide wins it hand by hand instead (each undress scene).
+        return any("renpy.has_label" in s or "renpy.loadable" in s or "g_poker_game" in s for s in srcs)
 
     def force(self, steps):
         for kind, node, idx in steps:
