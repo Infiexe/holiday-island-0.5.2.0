@@ -411,6 +411,231 @@ init 900 python:
             return words + hisg_engine(c)
         return u"Another check in the game's script (point here to see it)" + hisg_engine(c)
 
+    def hisg_effect_text(c, d):
+        """player.get_effect_state("blue pill") > 0 -> "The blue pill is working"."""
+        m = hisg_re.search(r"""get_effect_state\(["']([^"']+)["']\)""", c.src)
+        name = m.group(1) if m else d["effect"]
+        op, v = d["op"], d["value"]
+        yes = {">": v == 0, ">=": v <= 1, "!=": v == 0, "==": v > 0}.get(op)
+        no = {"==": v == 0, "<=": v == 0, "<": v <= 1}.get(op)
+        if yes:
+            return u"You have the \u201c%s\u201d effect" % name
+        if no:
+            return u"You don't have the \u201c%s\u201d effect" % name
+        word = {"==": u"exactly", "!=": u"not", ">": u"above", ">=": u"at least", "<": u"below", "<=": u"at most"}.get(op, op)
+        return u"Your \u201c%s\u201d effect is %s level %s" % (name, word, v)
+
+    HISG_SKILL_NAMES = {"get_strength": "strength", "get_charm": "charm", "get_looks": "looks",
+                        "get_hacking": "hacking", "get_endurance": "endurance", "get_sneaking": "sneaking"}
+    HISG_GETTERS = {"get_mood": "mood"}
+
+    def hisg_flag_words(name, value):
+        base = name
+        for pre in ("lo_", "l_", "i_"):
+            if base.startswith(pre):
+                base = base[len(pre):]
+                break
+        base = base.replace("_", " ")
+        if hisg_re.match(r"^option\d+$", name):
+            return u"In the scene: your earlier dialogue choice (%s) %s" % (name, u"is open" if value else u"was already taken")
+        if name.startswith("i_"):
+            return u"The scene is started %s %s" % (u"with" if value else u"without", base)
+        return u"In the scene: %s%s" % (u"" if value else u"not ", base)
+
+    def hisg_op_text(op):
+        return {"Eq": u"is", "NotEq": u"is not", "Gt": u"is more than", "GtE": u"is at least",
+                "Lt": u"is less than", "LtE": u"is at most"}.get(op, op)
+
+    def hisg_leaf(n, neg, char):
+        """Single comparisons and calls the game uses everywhere, in words."""
+        cn = n.__class__.__name__
+        flip = lambda o: HISG_FLIP.get(o, o) if neg else o
+        # a local flag on its own: l_titfuck, option1, i_flag
+        if cn == "Name" and (n.id.startswith(("l_", "lo_", "i_")) or hisg_re.match(r"^option\d+$", n.id)):
+            return hisg_flag_words(n.id, not neg)
+        if cn == "Call":
+            return hisg_call_words(n, True, neg, char)
+        if cn != "Compare" or len(n.ops) != 1:
+            return None
+        op = n.ops[0].__class__.__name__
+        left, right = n.left, n.comparators[0]
+        try:
+            rv = eval(hisg.unparse(right), {}, {})
+        except Exception:
+            rv = None
+        lsrc = hisg.unparse(left)
+        # local flag == True/False, or a started-with value
+        if left.__class__.__name__ == "Name" and (left.id.startswith(("l_", "lo_", "i_")) or hisg_re.match(r"^option\d+$", left.id)):
+            if isinstance(rv, bool):
+                val = rv if op in ("Eq", "Is") else (not rv if op in ("NotEq", "IsNot") else None)
+                if val is not None:
+                    return hisg_flag_words(left.id, val != neg)
+            if rv is not None and left.id.startswith(("i_", "lo_")):
+                return u"The scene is started with %s %s %s" % (left.id[2:].replace("_", " "), hisg_op_text(flip(op)), rv)
+            if rv is not None:
+                return u"In the scene: %s %s %s" % (left.id[2:].replace("_", " "), hisg_op_text(flip(op)), rv)
+        # call compared with a value
+        if left.__class__.__name__ == "Call" and rv is not None:
+            if isinstance(rv, bool):
+                want = rv if op in ("Eq", "Is") else (not rv if op in ("NotEq", "IsNot") else None)
+                if want is not None:
+                    out = hisg_call_words(left, want, neg, char)
+                    if out:
+                        return out
+            else:
+                out = hisg_call_value_words(left, flip(op), rv, char)
+                if out:
+                    return out
+        # char.id == alice.id : whose scene this is
+        mi = hisg_re.match(r"^(\w+)\.(id|fname)$", lsrc)
+        if mi and op in ("Eq", "NotEq"):
+            other = hisg.unparse(right)
+            mo = hisg_re.match(r"^(\w+)\.(?:id|fname)$", other)
+            who = hisg_char_by_var(mo.group(1), char) if mo else None
+            name = getattr(who, "fname", None) or (rv if isinstance(rv, str) else None)
+            if name:
+                return u"It is %s%s" % (u"" if (op == "Eq") != neg else u"not ", hisg_esc(name))
+        # outfits: char.nightwear == 1
+        mw = hisg_re.match(r"^(\w+)\.(swimwear|nightwear|dinerwear|receptionwear|doctorwear)$", lsrc)
+        if mw and isinstance(rv, int) and op in ("Eq", "NotEq"):
+            who = hisg_char_by_var(mw.group(1), char)
+            return u"%s wears %s%s" % (hisg_esc(who.fname), u"" if (op == "Eq") != neg else u"not ",
+                                       hisg_wear_name(mw.group(2), rv) if mw.group(2) in ("swimwear", "nightwear") else u"work outfit %s" % (rv + 1))
+        # poker internals
+        if "lo_participant" in lsrc:
+            if lsrc.endswith(".undress") and hisg.unparse(right).endswith(".undress_old"):
+                more = flip(op) in ("GtE", "Gt")
+                return u"Poker: she %s" % (u"is taking something off (she just lost a hand)" if more else u"is dressing again (she just won a hand)")
+            if lsrc.endswith(".undress") and isinstance(rv, int):
+                return u"Poker: she is %s stage %s of undressing" % (u"at" if flip(op) == "Eq" else u"not at", rv)
+        # the island has room for another girl
+        if "g_max_chars_on_island" in hisg.unparse(right) or "g_max_chars_on_island" in lsrc:
+            room = (flip(op) in ("LtE", "Lt"))
+            return u"There is %s on the island for another girl (limit %s)" % (u"room" if room else u"no room", g_max_chars_on_island)
+        # abs(her.island_days - l_x) <= K
+        ma = hisg_re.match(r"^abs\((\w+)\.island_days - (\w+)\)$", lsrc)
+        if ma and isinstance(rv, int):
+            who = hisg_char_by_var(ma.group(1), char)
+            near = (flip(op) in ("LtE", "Lt"))
+            return u"%s's time on the island (%s days) is %s %d days of the anniversary day the scene counts from" % (
+                hisg_esc(who.fname), getattr(who, "island_days", "?"), u"within" if near else u"more than", rv)
+        # you are at the beach
+        if left.__class__.__name__ == "Name" and left.id in ("location", "location1") and isinstance(rv, str) and op in ("Eq", "NotEq"):
+            return u"you are %sat %s" % (u"" if (op == "Eq") != neg else u"not ", hisg_location_text(rv))
+        # mia.active == True
+        mb = hisg_re.match(r"^(\w+)\.(active|visible|introduced)$", lsrc)
+        if mb and isinstance(rv, bool) and op in ("Eq", "NotEq"):
+            who = hisg_char_by_var(mb.group(1), char)
+            yes = ((rv) == (op == "Eq")) != neg
+            return u"%s is %s%s" % (hisg_esc(getattr(who, "fname", mb.group(1))), u"" if yes else u"not ",
+                                    {"active": u"on the island", "visible": u"visible in your phone", "introduced": u"introduced to you"}[mb.group(2)])
+        # char.get_interaction_gameday("sex") > gameday - 20 : did it recently
+        m = hisg_re.match(r"""^(\w+)\.get_interaction_gameday\(["']([^"']+)["']\)$""", lsrc)
+        mr = hisg_re.match(r"^gameday - (\d+)$", hisg.unparse(right))
+        if m and mr:
+            who = hisg_char_by_var(m.group(1), char)
+            recent = (flip(op) in ("Gt", "GtE"))
+            days = int(mr.group(1))
+            return u"%s %s \u201c%s\u201d with you in the last %d days" % (
+                hisg_esc(who.fname), u"did" if recent else u"did not do", m.group(2), days)
+        # jennifer.get_event_seen_last("X") < gameday : not already today
+        m = hisg_re.match(r"""^(\w+)\.get_(scene|event|appointment)_seen_last\(["']([^"']+)["']\)$""", lsrc)
+        if m and hisg.unparse(right) == "gameday":
+            who = hisg_char_by_var(m.group(1), char)
+            before_today = (flip(op) in ("Lt", "LtE"))
+            return u"%s %s \u201c%s\u201d %s" % (hisg_esc(who.fname), HISG_KIND_TEXT.get(m.group(2), m.group(2)),
+                                                  hisg_title(m.group(3)), u"did not happen today" if before_today else u"happened today")
+        # char.locations[actions_left - k] == "place"
+        m = hisg_re.match(r"^(\w+)\.locations\[actions_left\s*-\s*(\d+)\]$", lsrc)
+        if m and isinstance(rv, str) and op in ("Eq", "NotEq"):
+            who = hisg_char_by_var(m.group(1), char)
+            k = int(m.group(2))
+            where = hisg_location_text(rv) if not rv.endswith("_room") else u"her room"
+            when = u"now" if k == 1 else u"%s min from now" % (30 * (k - 1))
+            is_eq = (op == "Eq") != neg
+            return u"%s is %sat %s %s" % (hisg_esc(who.fname), u"" if is_eq else u"not ", where, when)
+        # a.times % 2 == 0, first_island_day + N <= gameday
+        m = hisg_re.match(r"^(\w+)\.(\w+) % 2$", lsrc)
+        if m and rv in (0, 1) and op in ("Eq", "NotEq"):
+            who = hisg_char_by_var(m.group(1), char)
+            even = ((rv == 0) == (op == "Eq")) != neg
+            what = HISG_ATTR_TEXT.get(m.group(2), (m.group(2).replace("_", " "), u""))[0]
+            return u"%s %s an %s number of times (now %s)" % (hisg_esc(who.fname), what, u"even" if even else u"odd", getattr(who, m.group(2), "?"))
+        m = hisg_re.match(r"^(\w+)\.first_island_day \+ (\d+)$", lsrc)
+        if m and hisg.unparse(right) == "gameday":
+            who = hisg_char_by_var(m.group(1), char)
+            days = int(m.group(2))
+            ok = (op in ("LtE", "Lt")) != neg
+            first = getattr(who, "first_island_day", 0)
+            return u"%s %s at least %d days since she arrived (arrived on day %s, today is day %s)" % (
+                hisg_esc(who.fname), u"is" if ok else u"is not yet", days, first, gameday)
+        # location1 in gl_locations_outside ; plain weather flags
+        if op in ("In", "NotIn") and hisg.unparse(right) == "gl_locations_outside":
+            inside = (op == "NotIn") != neg
+            return u"you are %s" % (u"indoors" if inside else u"outdoors")
+        m = hisg_re.match(r"^g_rainy_(morning|afternoon)$", lsrc)
+        if m and isinstance(rv, bool):
+            rain = (rv if op in ("Eq", "Is") else not rv) != neg
+            return u"it %s this %s" % (u"rains" if rain else u"doesn't rain", m.group(1))
+        return None
+
+    def hisg_call_words(call, want, neg, char):
+        """get_action_allowed("x") and friends used as a plain true/false test."""
+        src = hisg.unparse(call)
+        want = want != neg
+        m = hisg_re.match(r"""^(\w+)\.get_action_allowed\(["']([^"']+)["']\)$""", src)
+        if m:
+            who = player if m.group(1) == "player" else hisg_char_by_var(m.group(1), char)
+            special = hisg_orgasm_text(m.group(2), want)
+            if special:
+                return special
+            what = hisg_action_text(m.group(2), who) or m.group(2).replace("_", " ")
+            left = hisg_cooldown_left(who, m.group(2))
+            if want:
+                return u"\u201c%s\u201d is possible right now" % what
+            return u"Only shortly after \u201c%s\u201d%s" % (what, u"" if left is None else u" (%s left)" % hisg_hours(left))
+        m = hisg_re.match(r"""^(\w+)\.get_action_icon_available\(["']([^"']+)["']\)$""", src)
+        if m:
+            who = hisg_char_by_var(m.group(1), char)
+            what = m.group(2).replace("nightbar_poker_", "").replace("_", " ")
+            return u"%s offers \u201c%s\u201d (unlocked)" % (hisg_esc(who.fname), what) if want else u"\u201c%s\u201d is not unlocked with %s" % (what, hisg_esc(who.fname))
+        m = hisg_re.match(r"^(\w+)\.get_mood\(\)$", src)
+        return None
+
+    def hisg_call_value_words(call, op, rv, char):
+        src = hisg.unparse(call)
+        m = hisg_re.match(r"""^(\w+)\.(get_\w+)\(\)$""", src)
+        if m:
+            who = player if m.group(1) == "player" else hisg_char_by_var(m.group(1), char)
+            owner = u"Your" if who is player else u"%s's" % hisg_esc(who.fname)
+            if m.group(2) in HISG_SKILL_NAMES:
+                now = getattr(who, m.group(2))()
+                return u"%s %s %s %s %s (now %s)" % (owner, HISG_SKILL_NAMES[m.group(2)], u"", hisg_op_text(op), rv, now)
+            if m.group(2) == "get_mood":
+                now = who.get_mood()
+                return u"%s mood %s \u201c%s\u201d (now \u201c%s\u201d)" % (owner, hisg_op_text(op), rv, now)
+        m = hisg_re.match(r"""^(\w+)\.get_interaction_gameday\(["']([^"']+)["']\)$""", src)
+        if m:
+            return None
+        m = hisg_re.match(r"""^(\w+)\.get_sexting_times_used\((\d+)\)$""", src)
+        if m and isinstance(rv, int):
+            who = hisg_char_by_var(m.group(1), char)
+            used = who.get_sexting_times_used(int(m.group(2)))
+            return u"Picture message %s was sent %s (now %s)" % (m.group(2), hisg_count(HISG_OPNAME.get(op, op), rv, u"time"), hisg_count("Eq", used, u"time"))
+        m = hisg_re.match(r"""^player\.get_quest_state\(["']([^"']+)["'],\s*(\w+)\)$""", src)
+        if m and isinstance(rv, int):
+            who = hisg_quest_owner(m.group(1), hisg_char_by_var(m.group(2), char))
+            cur = hisg_quest_state(who, m.group(1))
+            return u"Quest \u201c%s\u201d: %s (now %s)" % (hisg_esc(hisg_quest_title(m.group(1), who)), hisg_quest_need(HISG_OPSYM.get(op, op), rv),
+                                                      "not started" if cur < 0 else ("done" if cur >= 100 else u"step %s" % cur))
+        m = hisg_re.match(r"""^(\w+)\.get_(scene|event|appointment)_seen_last\(["']([^"']+)["']\)$""", src)
+        if m and isinstance(rv, int) is False:
+            return None
+        return None
+
+    HISG_OPNAME = {"Eq": "Eq", "NotEq": "NotEq", "Gt": "Gt", "GtE": "GtE", "Lt": "Lt", "LtE": "LtE"}
+    HISG_OPSYM = {"Eq": "==", "NotEq": "!=", "Gt": ">", "GtE": ">=", "Lt": "<", "LtE": "<="}
+
     def hisg_orgasm_text(action, want):
         """The game's orgasm timers: orgasm3days runs for 3 days after you came."""
         m = hisg_re.match(r"^orgasm(\d)days?(_text)?$", action)
@@ -639,6 +864,9 @@ init 900 python:
                 return None
             joiner = u" and " if (is_and != neg) else u" or "
             return joiner.join(parts)
+        leaf = hisg_leaf(n, neg, char)
+        if leaf:
+            return leaf
         if cn == "Compare" and len(n.ops) == 1:
             op = n.ops[0].__class__.__name__
             if neg:
@@ -682,8 +910,9 @@ init 900 python:
             m = hisg_re.match(r"^(\w+)\.(lust|anger)$", left)
             if m and isinstance(rv, int):
                 who = hisg_char_by_var(m.group(1), char)
-                sym = {"GtE": ">=", "Gt": ">", "LtE": "<=", "Lt": "<", "Eq": "=", "NotEq": "is not"}.get(op, "?")
-                return u"%s's %s %s %s (now %s)" % (hisg_esc(who.fname), m.group(2), sym, rv, getattr(who, m.group(2), "?"))
+                sym = {"GtE": u"at least", "Gt": u"more than", "LtE": u"at most", "Lt": u"less than",
+                       "Eq": u"exactly", "NotEq": u"not"}.get(op, u"?")
+                return u"%s's %s is %s %s (now %s)" % (hisg_esc(who.fname), m.group(2), sym, rv, getattr(who, m.group(2), "?"))
         if cn == "Compare" and len(n.ops) == 1:
             op = n.ops[0].__class__.__name__
             if neg:
@@ -925,7 +1154,7 @@ init 900 python:
         if k == "effect":
             if d["effect"] == "erection":
                 return hisg_erection_row(c, char, guided)
-            t = u"Effect %s %s %s" % (d["effect"], d["op"], d["value"])
+            t = hisg_effect_text(c, d) + hisg_engine(c)
             v, _r = hisg_eval(c, char, defaults)
             if v:
                 return "ok", t, None
@@ -1030,6 +1259,9 @@ init 900 python:
                 return "auto", t + u" - Guided mode makes it go your way", None
             if p is not None and p >= 0.999:
                 return "ok", t, None
+            return "unknown", t, None
+        elif v is None and _r.startswith("call") and not hisg_describe(c, char).startswith(u"Another check"):
+            t = hisg_describe(c, char)
             return "unknown", t, None
         elif v is None and _r.startswith("call"):
             m = hisg_re.search(r"\.(\w+)\(", c.src)

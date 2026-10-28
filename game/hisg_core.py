@@ -1362,6 +1362,22 @@ def build_plan(index, kind, name, char, store, meta=None, marker=None):
         plan.skipped += [c for c in trig if c.kind not in wanted]
     subj = plan.marker.subject.strip()
     owner_params = [p for p, _d in index.params.get(plan.marker.owner, [])]
+    # The label above the scene draws the girl (char1 = renpy.random.choice(...)
+    # and then reaches the scene with her).
+    if subj in CHAR_NAMES and subj not in ("event_char", "selected_char"):
+        names = set([subj])
+        for hop in plan.hops[1:]:
+            if hop.edge is not None:
+                for arg in hop.edge.args:
+                    nm = _split_kw(arg)[1].strip()
+                    if nm in CHAR_NAMES:
+                        names.add(nm)
+        for hop in plan.hops[1:]:
+            for name in sorted(names):
+                if random_pick(index, hop.label, name):
+                    plan.pick = name
+    if plan.pick:
+        pass
     if (subj.startswith(("l_", "ll_")) or re.match(r"^\w+\[", subj)) and subj not in owner_params:
         # e.g. a contest: the game picks who takes part while it runs.
         if random_pick(index, plan.marker.owner, subj):
@@ -1920,6 +1936,16 @@ def step_values(index, cond, store):
     return out
 
 
+LIST_COND_RE = re.compile(r"\blen\(|\bcounter\b|\blist_\w+|\w\[\w*\]\.")
+
+
+def _builds_list(node, idx):
+    try:
+        return bool(LIST_COND_RE.search(text(node.entries[idx][0])))
+    except Exception:
+        return False
+
+
 def forceable_steps(index, steps):
     """
     Steps Guided mode may force. An if that reads what the scene itself
@@ -1934,10 +1960,6 @@ def forceable_steps(index, steps):
                 src = " ".join(text(e[0]) for e in node.entries[:i + 1])
             except Exception:
                 src = ""
-            # Lists and counters the scene builds (a roll's result such as
-            # l_bet_won may still be forced).
-            if re.search(r"\blen\(|\bcounter\b|\blist_\w+|\w\[\w*\]\.", src):
-                continue
         out.append(st)
     return out
 
@@ -2116,9 +2138,39 @@ class Patcher(object):
         # Poker: the guide wins it hand by hand instead (each undress scene).
         return any("renpy.has_label" in s or "renpy.loadable" in s or "g_poker_game" in s for s in srcs)
 
+    @staticmethod
+    def _soften(src):
+        """
+        "len(pool) > 0 and renpy.random.randint(1, 100) < 50" -> "len(pool) > 0 and True":
+        the rolls are forced, the list the scene builds is left to the scene.
+        Returns None when there is no roll to force.
+        """
+        try:
+            tree = pyast.parse(text(src).replace("<>", "!="), mode="eval").body
+        except SyntaxError:
+            return None
+        terms = list(tree.values) if (cls_name(tree) == "BoolOp" and cls_name(tree.op) == "And") else [tree]
+        changed, out = False, []
+        for x in terms:
+            if "random" in unparse(x):
+                out.append("True")
+                changed = True
+            else:
+                out.append(unparse(x))
+        return " and ".join(out) if changed else None
+
     def force(self, steps):
         for kind, node, idx in steps:
             if kind in ("if", "guard") and self._technical(node, idx):
+                continue
+            if kind in ("if", "guard") and _builds_list(node, idx):
+                soft = self._soften(node.entries[idx][0])
+                if soft is None:
+                    continue
+                if kind == "if":
+                    for j in range(idx):
+                        self._set_entry(node, j, u"False")
+                    self._set_entry(node, idx, soft)
                 continue
             if kind == "if":
                 for j in range(idx):
