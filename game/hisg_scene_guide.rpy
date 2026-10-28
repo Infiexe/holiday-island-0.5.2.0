@@ -1586,6 +1586,15 @@ init 900 python:
         store.location_detail = ""
         return rebuild
 
+    HISG_PLAIN_BACKGROUND = ("doctor", "reception")
+
+    def hisg_plain_background(loc):
+        for name in ("locations/loc_%s%s_main.webp" % (loc, daytime), "locations/loc_%s_main.webp" % loc,
+                     "locations/loc_%s_main.jpg" % loc):
+            if renpy.loadable(name):
+                return name
+        return None
+
     def hisg_draw_background(char):
         scenes = hisg.RUNTIME.get("background") or []
         for node in reversed(scenes):
@@ -1945,7 +1954,14 @@ label hisg_run(hisg_kind, hisg_name, hisg_char, hisg_replay=False):
     if hisg_call[3]:
         # Moved to another place: draw it, since many scenes only show
         # the people on top of whatever is on screen.
-        call main_game_background (location, location_detail, "goto_" + location) from _call_hisg_bg
+        if location in HISG_PLAIN_BACKGROUND:
+            # The game's own routine would greet us as whoever is "at" this
+            # place (the doctor's office starts a scene with the nurse list).
+            $ hisg_bg = hisg_plain_background(location)
+            if hisg_bg:
+                scene expression hisg_bg
+        else:
+            call main_game_background (location, location_detail, "goto_" + location) from _call_hisg_bg
     # The picture the game shows just before this part (e.g. the arrival
     # in the hallway before Desire's own lines).
     $ hisg_draw_background(hisg_char)
