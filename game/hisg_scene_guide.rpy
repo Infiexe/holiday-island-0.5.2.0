@@ -529,6 +529,22 @@ init 900 python:
             yes = ((rv) == (op == "Eq")) != neg
             return u"%s is %s%s" % (hisg_esc(getattr(who, "fname", mb.group(1))), u"" if yes else u"not ",
                                     {"active": u"on the island", "visible": u"visible in your phone", "introduced": u"introduced to you"}[mb.group(2)])
+        # heather.rsm[0].love >= 75
+        ms = hisg_re.match(r"^(\w+)\.rsm\[0\]\.(love|affection|anger|favor|lust)$", lsrc)
+        if ms and isinstance(rv, (int, float)):
+            who = hisg_char_by_var(ms.group(1), char)
+            try:
+                now = getattr(who.rsm[0], ms.group(2))
+            except Exception:
+                now = "?"
+            return u"%s's %s %s %s (now %s)" % (hisg_esc(who.fname), ms.group(2), hisg_op_text(flip(op)), rv, now)
+        # nobody else around
+        if lsrc == "len(list_of_chars_display_3)" and isinstance(rv, int):
+            alone = (flip(op) == "Eq" and rv == 0) or (flip(op) in ("Lt", "LtE") and rv <= 1)
+            return u"nobody else is around" if alone else u"someone else is around"
+        # room service on the schedule
+        if lsrc.startswith("roomservice_schedule["):
+            return u"room service is %sscheduled for now" % (u"" if (op == "Eq") != neg else u"not ")
         # char.get_interaction_gameday("sex") > gameday - 20 : did it recently
         m = hisg_re.match(r"""^(\w+)\.get_interaction_gameday\(["']([^"']+)["']\)$""", lsrc)
         mr = hisg_re.match(r"^gameday - (\d+)$", hisg.unparse(right))
@@ -546,7 +562,7 @@ init 900 python:
             return u"%s %s \u201c%s\u201d %s" % (hisg_esc(who.fname), HISG_KIND_TEXT.get(m.group(2), m.group(2)),
                                                   hisg_title(m.group(3)), u"did not happen today" if before_today else u"happened today")
         # char.locations[actions_left - k] == "place"
-        m = hisg_re.match(r"^(\w+)\.locations\[actions_left\s*-\s*(\d+)\]$", lsrc)
+        m = hisg_re.match(r"^(\w+)\.locations\[(?:actions_left|ap)\s*-\s*(\d+)\]$", lsrc)
         if m and isinstance(rv, str) and op in ("Eq", "NotEq"):
             who = hisg_char_by_var(m.group(1), char)
             k = int(m.group(2))
@@ -599,7 +615,10 @@ init 900 python:
             who = hisg_char_by_var(m.group(1), char)
             what = m.group(2).replace("nightbar_poker_", "").replace("_", " ")
             return u"%s offers \u201c%s\u201d (unlocked)" % (hisg_esc(who.fname), what) if want else u"\u201c%s\u201d is not unlocked with %s" % (what, hisg_esc(who.fname))
-        m = hisg_re.match(r"^(\w+)\.get_mood\(\)$", src)
+        m = hisg_re.match(r"""^player\.get_quest_exists\(["']([^"']+)["'],\s*(\w+)\)$""", src)
+        if m:
+            who = hisg_quest_owner(m.group(1), hisg_char_by_var(m.group(2), char))
+            return u"Quest \u201c%s\u201d %s" % (hisg_esc(hisg_quest_title(m.group(1), who)), u"has been given to you" if want else u"has not been given yet")
         return None
 
     def hisg_call_value_words(call, op, rv, char):
@@ -635,6 +654,18 @@ init 900 python:
 
     HISG_OPNAME = {"Eq": "Eq", "NotEq": "NotEq", "Gt": "Gt", "GtE": "GtE", "Lt": "Lt", "LtE": "LtE"}
     HISG_OPSYM = {"Eq": "==", "NotEq": "!=", "Gt": ">", "GtE": ">=", "Lt": "<", "LtE": "<="}
+
+    def hisg_cooldown_starter(action, who):
+        """The scene / event that starts this waiting time (link target)."""
+        idx = hisg_index()
+        if idx is None:
+            return None
+        owners = idx.cooldown_setters.get(action, [])
+        for owner in owners:
+            for (kind, mname), mks in idx.markers.items():
+                if kind in ("scene", "event", "appointment") and any(m.owner == owner for m in mks):
+                    return (who, kind, mname)
+        return None
 
     def hisg_orgasm_text(action, want):
         """The game's orgasm timers: orgasm3days runs for 3 days after you came."""
@@ -1107,13 +1138,20 @@ init 900 python:
             v, _r = hisg_eval(c, char, defaults)
             if v:
                 return "ok", t, None
-            if who is char and (guided or hisg_outfit_allowed(char, d["attr"], d["value"]) or d["op"] != "=="):
+            if (who is char or d["op"] == "==") and (guided or hisg_outfit_allowed(who, d["attr"], d["value"]) or d["op"] != "=="):
                 return "auto", t + " - the guide changes it", None
             return "bad", t + hisg_outfit_missing_text(who, d["attr"], d["value"]), hisg_outfit_link(who, d["attr"], d["value"])
         if k == "alone":
             return "auto", u"You are alone with %s - the guide sends the others away" % nm, None
         if k == "company":
             return "unknown", u"Someone else has to be there too", None
+        mo = HISG_OTHER_LOC_RE.search(c.src) if not c.negated else None
+        if mo and hisg_other_girl(mo.group(1), char) is not None:
+            other = hisg_other_girl(mo.group(1), char)
+            where = hisg_location_text(mo.group(3))
+            if other in list_of_characters:
+                return "auto", u"%s is at %s too - the guide brings her there" % (hisg_esc(other.fname), where) + hisg_engine(c), None
+            return "bad", u"%s has to be at %s, but she is not on the island" % (hisg_esc(other.fname), where) + hisg_engine(c), None
         m = hisg_re.match(r"""^\s*(?:i_name|i_item_name|l_item_name|l_gift_name|i_gift|l_gift|l_item)\s*==\s*["'](.+)["']\s*$""", c.src)
         if m and k == "other":
             # The present you pick from your bag.
@@ -1229,6 +1267,8 @@ init 900 python:
                 # The scene needs the waiting time to be running.
                 what = hisg_action_text(d["action"], who) or hisg_esc(d["action"].replace("_", " "))
                 left = hisg_cooldown_left(who, d["action"])
+                if not v:
+                    link = hisg_cooldown_starter(d["action"], who)
                 if left is not None:
                     t = u"Only shortly after \u201c%s\u201d (%s left)" % (what, hisg_hours(left))
                 else:
@@ -1910,6 +1950,51 @@ init 900 python:
                 continue
         return False
 
+    HISG_OTHER_LOC_RE = hisg_re.compile(r"""(\w+)\.locations\[\s*(?:actions_left|ap)\s*-\s*(\d+)\s*\]\s*==\s*["'](\w+)["']""")
+
+    def hisg_other_girl(name, char):
+        other = getattr(store, name, None)
+        if other is None or other is char or not hasattr(other, "locations") or not getattr(other, "fname", ""):
+            return None
+        return other
+
+    def hisg_arrange_others(plan, char, guided):
+        """
+        Another girl the scene needs (Jessica at the beach in her bikini for
+        the couple pose): bring her there and dress her, like the girl herself.
+        Returns True when the people on screen have to be redrawn.
+        """
+        moved = False
+        for c in plan.conds:
+            if c.negated:
+                continue
+            d = c.data
+            if c.kind == "outfit":
+                other = hisg_other_girl(d.get("who", ""), char)
+                if other is not None and d.get("op") == "==" and (guided or hisg_outfit_allowed(other, d["attr"], d["value"])):
+                    setattr(other, d["attr"], d["value"])
+                continue
+            if c.kind == "char_location" and d.get("op") == "==":
+                other = hisg_other_girl(d.get("who", ""), char)
+                if other is not None and other in list_of_characters:
+                    try:
+                        other.locations[actions_left - d.get("back", 1)] = d["location"]
+                        moved = True
+                    except Exception:
+                        pass
+                continue
+            m = HISG_OTHER_LOC_RE.search(c.src)
+            if m:
+                other = hisg_other_girl(m.group(1), char)
+                if other is not None and other in list_of_characters:
+                    try:
+                        other.locations[actions_left - 1] = m.group(3)
+                        other.locations[actions_left - int(m.group(2))] = m.group(3)
+                        moved = True
+                    except Exception:
+                        pass
+        return moved
+
     def hisg_set_role(expr, char):
         """jobs.doctor -> setattr(jobs, "doctor", char) for this scene."""
         try:
@@ -1999,6 +2084,16 @@ init 900 python:
             v, _r = hisg.safe_value(src, store.__dict__, {})
             if not _r:
                 setattr(store, var, v)
+        if hisg_arrange_others(plan, char, guided):
+            rebuild = True
+        if guided:
+            # The game only draws from girls whose waiting time is over.
+            for c in plan.conds:
+                if getattr(c, "from_pool", False) and c.kind == "cooldown" and c.data.get("want", True):
+                    try:
+                        char.rem_action_cooldown(c.data["action"])
+                    except Exception:
+                        pass
         for c in plan.conds:
             # Where she is headed next (the elevator takes her to her room).
             if (c.kind == "char_location" and c.data.get("back", 1) > 1 and c.data["op"] == "=="
