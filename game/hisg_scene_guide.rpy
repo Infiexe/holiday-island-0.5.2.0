@@ -275,6 +275,9 @@ init 900 python:
         if idx is not None:
             ns.update(hisg.step_values(idx, c, store))
         ns.update((n, char) for n in hisg.CHAR_NAMES)
+        for name in set(hisg_re.findall(r"\b(char[2-9])\b", c.src)):
+            if name not in ns:
+                ns[name] = char  # nobody else picked when the guide starts it
         for name in set(hisg_re.findall(r"\bl_\w+", c.src)):
             role = hisg_role_local(name)
             if role is not None:
@@ -490,6 +493,10 @@ init 900 python:
         mi = hisg_re.match(r"^(\w+)\.(id|fname)$", lsrc)
         if mi and op in ("Eq", "NotEq"):
             other = hisg.unparse(right)
+            if hisg_re.search(r"\b(char[2-9]|event_char\d)\b", lsrc + " " + other):
+                # char2: another girl the game may pick while it runs
+                same = (op == "Eq") != neg
+                return u"no other girl gets involved" if same else u"another girl there gets involved"
             mo = hisg_re.match(r"^(\w+)\.(?:id|fname)$", other)
             who = hisg_char_by_var(mo.group(1), char) if mo else None
             name = getattr(who, "fname", None) or (rv if isinstance(rv, str) else None)
@@ -619,6 +626,10 @@ init 900 python:
         if m:
             who = hisg_quest_owner(m.group(1), hisg_char_by_var(m.group(2), char))
             return u"Quest \u201c%s\u201d %s" % (hisg_esc(hisg_quest_title(m.group(1), who)), u"has been given to you" if want else u"has not been given yet")
+        m = hisg_re.match(r"""^player\.check_set_quest_fulfilled\(["']([^"']+)["'],\s*(\w+)\)$""", src)
+        if m:
+            who = hisg_quest_owner(m.group(1), hisg_char_by_var(m.group(2), char))
+            return u"Quest \u201c%s\u201d %s" % (hisg_esc(hisg_quest_title(m.group(1), who)), u"is done" if want else u"is not done")
         return None
 
     def hisg_call_value_words(call, op, rv, char):
@@ -805,6 +816,13 @@ init 900 python:
         "breast_size": (u"has breast size", u""),
     }
 
+    HISG_FLAG_TEXT = {
+        "is_special_character": (u"is one of the special girls (her own visit scenes)", u"is not one of the special girls"),
+        "room_number_known": (u"- you know her room number", u"- you don't know her room number"),
+        "bra_size_known": (u"- you know her bra size", u"- you don't know her bra size"),
+        "active": (u"is in the game", u"is not in the game"),
+    }
+
     def hisg_count(op, v, unit):
         """"at least 2 times", "more than once", "never"."""
         def num(x):
@@ -844,6 +862,10 @@ init 900 python:
             now = getattr(who, m.group(2))
         except Exception:
             return None
+        if isinstance(v, bool) and m.group(2) in HISG_FLAG_TEXT:
+            yes = (op == "Eq") == v
+            return u"%s %s (now %s)" % (hisg_esc(who.fname), HISG_FLAG_TEXT[m.group(2)][0 if yes else 1],
+                                        u"yes" if now else u"no")
         if isinstance(v, bool) or not isinstance(v, int) or not isinstance(now, (int, float)):
             return None
         verb, unit = HISG_ATTR_TEXT.get(m.group(2), (u"has %s" % m.group(2).replace("_", " "), u""))
@@ -1514,6 +1536,11 @@ init 900 python:
         rows = []
         unmet = False
         blocked = []
+        me = char
+        lead = getattr(store, plan.lead, None) if getattr(plan, "lead", "") else None
+        if lead is not None:
+            # She is the second girl: the scene starts with the other one.
+            char = lead
         exact = set((c.data["who"], c.data["attr"]) for c in plan.conds
                     if c.kind == "outfit" and c.data["op"] == "==")
         defaults = hisg.default_values(plan, store)
@@ -1561,23 +1588,39 @@ init 900 python:
 
         if plan.launchable and plan.pick:
             rows.insert(0, ("auto", u"%s takes part - the guide makes sure the game's draw picks her" % hisg_esc(char.fname), None))
+        for value in (getattr(plan, "pick_values", []) if plan.launchable else []):
+            if isinstance(value, basestring):
+                what = value.replace("visit_girls_room_", "").replace("visit_", "").replace("_", " ")
+                t = u"Random: the game draws what happens (“%s” is one of the options) - the guide makes it this one" % hisg_esc(what)
+            else:
+                t = u"Random: the game draws which version of the scene you get - the guide makes it number %s" % value
+            rows.insert(0, ("auto", t, None))
         orow = hisg_outfit_row(char, meta, plan, guided)
         if orow is not None:
             rows.insert(0, orow)
             if orow[0] == "bad":
                 blocked.append("outfit")
 
-        absent = [o for o in hisg_others_involved(char, meta, plan) if not hisg_on_island(o)]
+        absent = [o for o in hisg_others_involved(char, meta, plan) if not hisg_on_island(o) and o is not me]
         for other in absent:
             rows.insert(0, ("bad", u"%s is not on the island right now" % hisg_esc(other.fname), None))
+        if lead is not None:
+            t = u"The game starts this scene with %s, %s joins her - the guide sets it up with both of them%s" % (
+                hisg_esc(lead.fname), hisg_esc(me.fname), u"" if not plan.location else u" at " + hisg_location_text(plan.location))
+            if hisg_on_island(lead):
+                rows.insert(0, ("auto", t, None))
+            else:
+                rows.insert(0, ("bad", t + u" - but %s is not on the island right now" % hisg_esc(lead.fname), None))
+                blocked.append("lead")
+            char = me
         d["rows"] = rows
         d["notes"].extend(plan.notes)
         if plan.location:
             d["where"] = u"Where: %s" % hisg_location_text(plan.location)
         if plan.entry_return:
-            how = hisg_action_text(plan.entry_return, char)
+            how = hisg_action_text(plan.entry_return, lead or char)
             if how:
-                d["how"] = u"In the game: select %s, then \u201c%s\u201d" % (hisg_esc(char.fname), how)
+                d["how"] = u"In the game: select %s, then \u201c%s\u201d" % (hisg_esc((lead or char).fname), how)
         if plan.skipped:
             d["notes"].append("The random trigger of this %s is skipped by the guide." % HISG_KIND_TEXT.get(kind, kind))
 
@@ -1596,6 +1639,8 @@ init 900 python:
             d["play_hint"] = "%s is not on the island right now." % char.fname
         elif absent:
             d["play_hint"] = "%s is not on the island right now." % absent[0].fname
+        elif lead is not None and not hisg_on_island(lead):
+            d["play_hint"] = "%s, who this scene starts with, is not on the island right now." % lead.fname
         elif not guided and plan.location and not hisg_location_open(plan.location):
             d["play_hint"] = "%s is closed at this time of day." % hisg_location_text(plan.location).capitalize()
         elif not guided and blocked:
@@ -2076,8 +2121,23 @@ init 900 python:
             if not d["play"]:
                 renpy.notify(d["play_hint"] or "This one cannot be started right now.")
                 return None
+        me = char
+        if getattr(plan, "lead", ""):
+            # She is the second girl: set the scene up with the girl it
+            # starts with, and bring her along.
+            char = getattr(store, plan.lead)
+            try:
+                if plan.location:
+                    me.locations[actions_left - 1] = plan.location
+            except Exception:
+                pass
         alone = any(c.kind == "alone" for c in plan.conds)
-        rebuild = hisg_setup_env(char, plan.location, hisg_outfit_target(plan, char, meta), alone, guided)
+        rebuild = hisg_setup_env(char, plan.location, hisg_outfit_target(plan, char, meta if me is char else None), alone, guided)
+        if me is not char and plan.location:
+            try:
+                me.locations[actions_left - 1] = plan.location  # "alone" means without other girls
+            except Exception:
+                pass
         for var, src in plan.preset.items():
             # As the game sets them before it starts the scene
             # (event_char = miriam, event_char2 = mercedes).
@@ -2124,8 +2184,9 @@ init 900 python:
             kwvalues.update(hisg.auto_succeed_kwargs(hisg_index(), plan))
         if plan.poker_win:
             hisg_poker_shortcut(True)
-        if plan.pick:
-            hisg_pick_install(char)
+        picks = ([char] if plan.pick else []) + list(getattr(plan, "pick_values", []) or [])
+        if picks:
+            hisg_pick_install(picks)
         return (plan.target_label, values, kwvalues, rebuild)
 
     def hisg_after_list(char):
@@ -2151,20 +2212,31 @@ init 900 python:
 
     # -- contests: the game draws who takes part; make the draw pick her ---
 
-    def hisg_pick_install(char):
+    def hisg_pick_install(targets):
+        """
+        The game's draws give what the scene needs: her (contests, the gym
+        shower), the scene's number (Pool_distraction1) or the visit it is
+        (visit_girls_room_shower). Each target is used once.
+        """
         rng = renpy.python.rng
         rt = hisg.RUNTIME
         hisg_pick_remove()
-        rt["pick_char"], rt["pick_done"] = char, False
+        rt["pick_targets"] = list(targets)
         original = rng.choice
 
+        def same_kind(a, b):
+            if hisg._is_char_obj(a) or hisg._is_char_obj(b):
+                return a is b
+            return type(a) == type(b) and a == b
+
         def choice(seq):
-            target = rt.get("pick_char")
-            if target is not None and not rt.get("pick_done"):
+            todo = rt.get("pick_targets") or []
+            for target in list(todo):
                 try:
-                    if target in seq:
-                        rt["pick_done"] = True
-                        return target
+                    for item in seq:
+                        if same_kind(item, target):
+                            todo.remove(target)
+                            return item
                 except Exception:
                     pass
             return original(seq)
@@ -2174,7 +2246,7 @@ init 900 python:
         rng = renpy.python.rng
         if "choice" in rng.__dict__:
             del rng.__dict__["choice"]
-        hisg.RUNTIME["pick_char"] = None
+        hisg.RUNTIME["pick_targets"] = []
 
     def hisg_poker_shortcut(on):
         if on:

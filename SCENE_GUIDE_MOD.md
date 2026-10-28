@@ -37,6 +37,17 @@ Warunki są opisane zwykłymi słowami (np. „it's 17:00 or earlier (now 00:00)
 (now 52)”, „Random: 35% chance, or always the first time”). Oryginalny warunek ze skryptu gry
 pokazuje się po najechaniu myszką na wiersz.
 
+Mod ogarnia też sceny, w których gra coś losuje albo składa w locie:
+
+- losowanie wersji sceny (np. `Pool_distraction1`…`5`, strój Joy w biurze) i tego, co się
+  dzieje przy wizycie w pokoju (prysznic / noc / …) – mod sprawia, że wylosuje się ta właściwa;
+- losowanie dziewczyny z grupy (basen, prysznic na siłowni, konkursy) razem z filtrami, które
+  gra stosuje przy losowaniu (cooldown, strój, na który gra ma obrazki);
+- sceny dwóch dziewczyn, które gra startuje od tej drugiej (prysznic Alice z Amy, drink Faye
+  z Natashą, Desire z Jessicą, ciężary na siłowni z Amy) – karta pisze, z kim startuje scena,
+  a mod przyprowadza obie;
+- sceny przy barmance na zmianie (Honest: musi mieć zmianę, Guided: przejmuje ją).
+
 Brakujące sceny i questy mają link „Show how to get it”, który otwiera ich kartę (np. kolejny
 krok questa z opisem z dziennika questów gry i przyciskiem „Play next step”).
 
@@ -58,8 +69,8 @@ Kafelek „Special actions” otwiera tabelkę interakcji (flash / grope / pose)
 
 ## Ograniczenia
 
-- Ok. 6% wpisów nie ma drogi, którą da się odtworzyć automatycznie (np. pokazy mody w studiu,
-  część eventów na basenie, eventy z dwiema postaciami naraz). Karta pokazuje wtedy hinty z gry.
+- Ok. 2% wpisów nie ma drogi, którą da się odtworzyć automatycznie (konkursy, gdzie gra losuje
+  przeciwniczkę, joga przez lornetkę, mini-gry hotshots). Karta pokazuje wtedy hinty z gry.
 - Sceny po wygranej w pokera (nagrody, rozbieranie do końca itd.) startują od intro, a potem
   mod od razu daje Ci wygraną i pomija samą partię. Przy innych aktywnościach (np. hotshots)
   mod uruchamia aktywność; wynik zależy od jej przebiegu.
