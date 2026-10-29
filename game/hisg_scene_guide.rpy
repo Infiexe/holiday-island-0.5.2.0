@@ -54,6 +54,7 @@ init 900 python:
             try:
                 rt["index"] = hisg.Index().build(hisg_game().script.namemap)
                 rt["index"].arrange_check = lambda ret, char: hisg_arrange_check(ret, char)
+                rt["index"].picture_check = lambda plan, char: bool(hisg_missing_pictures(plan, char))
             except Exception as e:
                 rt["index_error"] = "%s: %s" % (e.__class__.__name__, e)
         return rt["index"]
@@ -1397,7 +1398,36 @@ init 900 python:
                 obj = getattr(store, names[word], None)
                 if obj is not None:
                     return obj
-        return who
+        # Who the game gives the quest about: a named girl, or the one with
+        # the job (the bartender for Jennifer's photo shooting quest).
+        idx = hisg_index()
+        if idx is None:
+            return who
+        about = []
+        for mk in idx.markers.get(("quest", qname), []):
+            if mk.op != "add":
+                continue
+            subj = mk.subject.strip().split("=", 1)[-1].strip()
+            if subj in hisg.CHAR_NAMES:
+                return who  # about whoever the scene is with
+            obj = getattr(store, subj, None)
+            if obj is None and subj.startswith("l_"):
+                for label in (mk.owner, idx.top_of.get(mk.entry, mk.owner)):
+                    role = hisg.role_local(idx, label, subj)
+                    if role:
+                        obj = hisg.safe_value(role, store.__dict__, {})[0]
+                        if obj is who or hisg.role_possible(idx, store, role, who):
+                            return who
+                        break
+                    named = hisg.fixed_local_char(idx, label, subj)
+                    if named:
+                        obj = getattr(store, named, None)
+                        break
+            if obj is not None and hasattr(obj, "fname") and hasattr(obj, "locations"):
+                if obj is who:
+                    return who
+                about.append(obj)
+        return about[0] if about else who
 
     def hisg_quest_need(op, value):
         """Plain words for "quest step <op> <value>"."""
@@ -2041,8 +2071,12 @@ init 900 python:
             rows.insert(0, ("auto", t + u" - done for her in Guided mode", None) if guided else ("bad", t, None))
             if not guided:
                 blocked.append("drawn")
+        miss = hisg_missing_pictures(plan, lead or char) if (plan_ok and plan.launchable and not statement) else ""
         if not plan_ok:
             d["play_hint"] = plan.reason or "The guide cannot start this one."
+        elif miss:
+            d["play_hint"] = ("The game has no pictures of %s for this scene (%s), so it would play on a black "
+                              "screen. In the game it happens with someone else." % ((lead or char).fname, miss))
         elif not on_island:
             d["play_hint"] = "%s is not on the island right now." % char.fname
         elif absent:
@@ -2533,6 +2567,8 @@ init 900 python:
 
     def hisg_set_role(expr, char):
         """jobs.doctor -> setattr(jobs, "doctor", char) for this scene."""
+        if not hisg.role_possible(hisg_index(), store, expr, char):
+            return  # never her job in the game: the one on duty stays
         try:
             parts = expr.split(".")
             obj = getattr(store, parts[0])
@@ -2713,6 +2749,13 @@ init 900 python:
         for st in plan.steps:
             if st[0] == "menu":
                 rt["highlight"].setdefault(st[1].name, set()).add(st[2])
+        missing = hisg_missing_pictures(plan, char)
+        if missing:
+            hisg_roles_restore()
+            rt["patcher"].restore()
+            rt["highlight"].clear()
+            renpy.notify("The game has no pictures of %s for this scene (%s) - it would play on a black screen." % (char.fname, missing))
+            return None
         rt["background"] = list(getattr(plan, "background", []) or [])
         values, kwvalues = hisg.resolve_args(hisg_index(), plan, char, store)
         if guided:
@@ -2724,6 +2767,86 @@ init 900 python:
             hisg_pick_install(picks)
         hisg_random_picks(plan)
         return (plan.target_label, values, kwvalues, rebuild)
+
+    HISG_PIC_RE = hisg_re.compile(r"""^\s*u?["']([^"']*\[[^"']*\.(?:webp|jpg|png))["']\s*$""")
+
+    def hisg_route_pictures(plan, limit=6):
+        """The first pictures shown on the way the guide takes: only the
+        branches of the route, up to the statement that unlocks it."""
+        idx = hisg_index()
+        chosen = dict((id(st[1]), st[2]) for st in plan.steps if st[0] in ("if", "menu"))
+        out = []
+        stop = [False]
+        target = getattr(plan.marker, "node", None)
+
+        def walk(block):
+            for st in block or []:
+                if stop[0] or len(out) >= limit:
+                    return
+                if st is target:
+                    stop[0] = True
+                    return
+                cn = st.__class__.__name__
+                if cn == "If":
+                    i = chosen.get(id(st))
+                    if i is not None:
+                        walk(st.entries[i][1])
+                    continue
+                if cn == "Menu":
+                    i = chosen.get(id(st))
+                    if i is not None and st.items[i][2] is not None:
+                        walk(st.items[i][2])
+                    continue
+                if cn in ("Scene", "Show"):
+                    imspec = getattr(st, "imspec", None)
+                    expr = imspec[1] if imspec else None
+                    m = HISG_PIC_RE.match(hisg.text(expr)) if expr else None
+                    if m and m.group(1) not in out:
+                        out.append(m.group(1))
+                    continue
+                if cn in ("Jump", "Return"):
+                    return
+                blk = getattr(st, "block", None)
+                if cn in ("Label", "Translate") and isinstance(blk, list):
+                    walk(blk)
+        for label in ([h.label for h in plan.hops[plan.target_idx:]] or [plan.target_label]):
+            node = idx.labels.get(label) if idx is not None else None
+            if node is not None and not stop[0]:
+                walk(node.block)
+        return out
+
+    def hisg_missing_pictures(plan, char):
+        """
+        A scene the game has no pictures for with her (Jennifer's scene played
+        with Eva) would run on a black screen. Returns the first missing
+        picture when none of the scene's first pictures exist, else "".
+        """
+        checked, found, first = 0, 0, ""
+        old = (getattr(store, "char1", None), getattr(store, "event_char", None), getattr(store, "selected_char", None))
+        try:
+            store.char1 = store.event_char = store.selected_char = char
+            for pics in [hisg_route_pictures(plan)]:
+                for pic in pics:
+                    if not hisg_re.search(r"\[(char1|event_char|selected_char)\.fname\]", pic):
+                        continue  # only pictures of the girl herself
+                    try:
+                        path = renpy.substitute(pic, translate=False)
+                    except Exception:
+                        continue
+                    if "[" in path:
+                        continue
+                    checked += 1
+                    if renpy.loadable(path):
+                        found += 1
+                    elif not first:
+                        first = path
+                if checked >= 4:
+                    break
+        finally:
+            store.char1, store.event_char, store.selected_char = old
+        if checked >= 2 and found == 0:
+            return first
+        return ""
 
     def hisg_after_list(char):
         """Makes sure the character is among the people shown."""
@@ -2739,8 +2862,8 @@ init 900 python:
         except Exception:
             pass
 
-    def hisg_begin(replay):
-        hisg.RUNTIME["run"] = {"replay": replay}
+    def hisg_begin(replay, char=None):
+        hisg.RUNTIME["run"] = {"replay": replay, "char": char}
         if replay:
             store.g_replay = True
 
@@ -2923,7 +3046,19 @@ init 900 python:
                 pass
         return hisg.RUNTIME["orig_menu"](items, *args, **kwargs)
 
+    def hisg_call_screen_wrapper(name, *args, **kwargs):
+        # "Which girl do you want to visit?" on the way to her scene: her.
+        run = hisg.RUNTIME.get("run")
+        if run and run.get("char") is not None and name == "select_girl" and len(args) >= 2 \
+                and args[1] == "Visit" and run["char"] in list(args[0] or []):
+            return run["char"]
+        return hisg.RUNTIME["orig_call_screen"](name, *args, **kwargs)
+
     hisg_exports = sys.modules["renpy.exports"]
+    if not getattr(hisg_exports.call_screen, "hisg_wrapped", False):
+        hisg.RUNTIME["orig_call_screen"] = hisg_exports.call_screen
+        hisg_call_screen_wrapper.hisg_wrapped = True
+        hisg_exports.call_screen = hisg_call_screen_wrapper
     if not getattr(hisg_exports.menu, "hisg_wrapped", False):
         hisg.RUNTIME["orig_menu"] = hisg_exports.menu
         hisg_menu_wrapper.hisg_wrapped = True
@@ -2949,7 +3084,7 @@ label hisg_run(hisg_kind, hisg_name, hisg_char, hisg_replay=False):
     if hisg_call[3]:
         call create_list_of_chars_display from _call_hisg_list
         $ hisg_after_list(hisg_char)
-    $ hisg_begin(hisg_replay)
+    $ hisg_begin(hisg_replay, hisg_char)
     if hisg_call[3]:
         # Moved to another place: draw it, since many scenes only show
         # the people on top of whatever is on screen.

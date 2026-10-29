@@ -1939,10 +1939,16 @@ def find_chains(index, start, char, store, global_ns, local_ns, max_depth=12, ma
     queue = [([Hop(start)], fixed_subject)]
     expanded = 0
     me = (getattr(char, "fname", "") or "").lower()
+    tops = {}
     while queue and len(results) < max_chains and expanded < 800:
         chain, fixed = queue.pop(0)
         expanded += 1
         top = chain[0].label
+        # Menus that jump back and forth between the parts of one scene:
+        # going up through the same label again and again gets nowhere.
+        tops[top] = tops.get(top, 0) + 1
+        if tops[top] > 4 and top != MAIN_LOOP_LABEL:
+            continue
         seen = set(h.label for h in chain)
         edges = list(index.callers.get(top, []))
         for e in index.expr_edges:
@@ -1950,6 +1956,8 @@ def find_chains(index, start, char, store, global_ns, local_ns, max_depth=12, ma
             if name == top:
                 edges.append(Edge(top, e.caller, e.path, e.args, node=e.node))
         fresh = [e for e in edges if e.caller not in seen]
+        if edges and not fresh and top != MAIN_LOOP_LABEL:
+            continue  # only reached from further down this same chain (a loop)
         usable = [e for e in fresh
                   if fixed or (
                       (all(_arg_ok(a, char, store) for j, a in enumerate(e.args) if _subject_arg(index, top, j, a))
@@ -2219,6 +2227,12 @@ def _build_plan(index, kind, name, char, store, meta=None, marker=None, lead_for
             continue
         if arrange is not None and kind != "schedule" and arrange(cand["entry_return"], char) is False:
             continue
+        pictures = getattr(index, "picture_check", None)
+        if pictures is not None:
+            # A branch the game only has pictures of other girls for.
+            probe.steps, probe.target_idx, probe.target_label = cand["steps"], cand["target_idx"], cand["target_label"]
+            if pictures(probe, char):
+                continue
         best = cand
         break
     plan.marker = best["marker"]
@@ -3034,7 +3048,14 @@ def is_char_var(name, char, store):
 
 def _fill_location(plan, meta, char, store=None):
     loc = ""
-    if meta is not None:
+    if plan.entry == "direct" and plan.target_label:
+        # action_pool_swim_not_topless: it starts at the pool.
+        loc = location_from_return(plan.target_label.replace("action_", "", 1))
+    if not loc and plan.entry_return.startswith("do_"):
+        # Where the way there starts (you ask her at the bar for a poker
+        # evening in your room).
+        loc = location_from_return(plan.entry_return)
+    if not loc and meta is not None:
         loc = getattr(meta, "location", "") or ""
     if loc == "Girl_room" and char is not None:
         loc = char.fname + "_room"
