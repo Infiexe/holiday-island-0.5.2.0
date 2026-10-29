@@ -22,7 +22,7 @@ Gra przy starcie sama go skompiluje. Działa obok Scene Guide i companion moda.
     (wszystkie naraz), **Invite selected**, **Select all**, **Clear**, **Cancel**.
 - **Recepcja → „Ask for a girl to be sent home, away from the island”**
   - bez 50 company favor,
-  - bez wymogu 8 dziewczyn na wyspie (zostaje tylko bezpiecznik, patrz niżej).
+  - minimum zostaje jak w grze: odesłać można, gdy na wyspie jest co najmniej 8 dziewczyn.
 - **Limit dziewczyn na wyspie** jest zdjęty także tam, gdzie gra go sprawdza poza
   recepcją: przy przyjeździe zaproszonej dziewczyny, w biurze Joy po 10 dniach
   (nie trzeba nikogo odsyłać przed zaproszeniem) i przy powrocie Amy.
@@ -35,13 +35,6 @@ Bez zmian zostaje to, co nie jest opłatą ani limitem:
 - gra sama nie dosyła losowych dziewczyn ponad swój limit 10 – zapraszasz tylko Ty,
 - lista zaproszeń pomija te same dziewczyny co oryginalna (personel, Yvette w trakcie
   questa z siostrą, Amy po zabiegu, dziewczyna odesłana tego samego dnia).
-
-## Bezpiecznik przy odsyłaniu
-
-Gra co tydzień losuje spośród dziewczyn na wyspie lekarkę, pokojówkę i recepcjonistki
-i wysypuje się, gdy nie ma kogo wylosować. Dlatego odesłanie jest dostępne tylko wtedy,
-gdy na wyspie są więcej niż 3 dziewczyny, które można odesłać. Liczbę można zmienić na
-początku pliku (`define HIFI_MIN_GIRLS_LEFT = 3`).
 
 ## Jak to działa
 
