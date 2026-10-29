@@ -9,11 +9,6 @@
 ## memory. Saves stay compatible; removing the mod brings the game's own
 ## rules back.
 
-# Sending a girl home is offered only while more than this many girls who
-# can be sent home are on the island: the weekly jobs (doctor, room service,
-# reception) are drawn from them and the game breaks with none left.
-define HIFI_MIN_GIRLS_LEFT = 3
-
 default hifi_last_invited = []
 default hifi_invited_text = ""
 
@@ -54,7 +49,6 @@ init 900 python:
                 ("[l_char_invited.char.fname] should arrive tomorrow", "[hifi_invited_text] should arrive tomorrow.")],
     }
     HIFI_SEND_HOME = {
-        "menu_part": ("len(list_of_characters) >= 8", "hifi_can_send_home()"),
         "if": {"player.company_favor < 50": "False"},
         "python": "player.change_company_favor(-50)",
         "say": [("if you have the necessary company favor", "Sure [jobs.reception.playername]."),
@@ -81,9 +75,6 @@ init 900 python:
                 continue
             rv.append(c)
         return rv
-
-    def hifi_can_send_home():
-        return len([c for c in list_of_characters if not c.is_staff_character]) > HIFI_MIN_GIRLS_LEFT
 
     def hifi_names(chars):
         names = [c.fname for c in chars]
@@ -141,9 +132,6 @@ init 900 python:
         s = hifi_cond(cond)
         if "menu" in rules and s == rules["menu"][0]:
             cond = rules["menu"][1]
-            hifi_report.append("%s:%d menu" % (menu.filename, menu.linenumber))
-        elif "menu_part" in rules and rules["menu_part"][0] in s:
-            cond = s.replace(*rules["menu_part"])
             hifi_report.append("%s:%d menu" % (menu.filename, menu.linenumber))
         menu.items[i] = (label, cond, block)
         nodes = hifi_children(block)
@@ -225,7 +213,7 @@ screen hifi_select_girls_to_invite(l_location, i_cancel_possible):
                             fit_first True
                             add Transform(pic, maxsize=thumb, alpha=(1.0 if c in picked else 0.5))
                             if c in picked:
-                                text u"\u2714" font "DejaVuSans.ttf" size 30 color "#7bd88f" outlines [(2, "#000000")] xalign 0.95 yalign 0.05
+                                text u"✔" font "DejaVuSans.ttf" size 30 color "#7bd88f" outlines [(2, "#000000")] xalign 0.95 yalign 0.05
 
     $ tip = GetTooltip()
     if tip:
