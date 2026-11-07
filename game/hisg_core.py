@@ -1953,6 +1953,11 @@ def find_chains(index, start, char, store, global_ns, local_ns, max_depth=12, ma
         edges = list(index.callers.get(top, []))
         for e in index.expr_edges:
             name, _r = safe_value(e.expr, global_ns, local_ns)
+            if name != top:
+                # call expression "play_poker_" + <the girl's name>.lower()
+                m = re.match(r"""^u?["'](\w+)["']\s*\+\s*\S""", text(e.expr).strip())
+                if m and me and top == m.group(1) + me and ".lower()" in text(e.expr):
+                    name = top
             if name == top:
                 edges.append(Edge(top, e.caller, e.path, e.args, node=e.node))
         fresh = [e for e in edges if e.caller not in seen]
@@ -2031,6 +2036,10 @@ def _evaluate_chain(index, chain, target_idx, char, global_ns, base_ns, location
             else:
                 values.append(v)
         bound = _bind(index, hop.label, values, kwvalues)
+        for pname in list(bound):
+            # visit_girls_room_main(l_visit_girl): the girl picked on screen is her.
+            if (pname in CHAR_NAMES or pname == "char1") and not _is_char_obj(bound[pname]):
+                bound[pname] = char
         ns = dict(base_ns)
         ns.update(bound)
     return values, kwvalues, ns
@@ -2045,7 +2054,7 @@ def _guess_value(src, char, location):
     low = src.lower()
     if "return" in low:
         return "goto_%s" % (location or "player_room")
-    if low in CHAR_NAMES:
+    if low in CHAR_NAMES or re.match(r"^(l_|i_)?\w*(girl|char)\d?$", low):
         return char
     return None
 
@@ -2123,6 +2132,8 @@ def _build_plan(index, kind, name, char, store, meta=None, marker=None, lead_for
     local_ns = dict((n, char) for n in CHAR_NAMES)
 
     markers = [marker] if marker is not None else index.markers_for(kind, name)
+    # The game's save updates mark things seen for old saves: not a way there.
+    markers = [m for m in markers if not _housekeeping(m.owner)]
     all_markers = list(markers)
     if lead_for is not None:
         # A quest about her can be started in the other girl's scene.
@@ -2145,8 +2156,8 @@ def _build_plan(index, kind, name, char, store, meta=None, marker=None, lead_for
             fixed = bool(store is not None and char is not None and subj == (getattr(char, "fname", "") or "").lower())
             for chain in find_chains(index, start, char, store, global_ns, local_ns,
                                      fixed_subject=fixed or lead_for is not None or fixed_sender(mk, store)):
-                if chain[0].label != MAIN_LOOP_LABEL and chain[0].label.startswith("test"):
-                    continue  # the developer's test labels
+                if chain[0].label != MAIN_LOOP_LABEL and (chain[0].label.startswith("test") or _housekeeping(chain[0].label)):
+                    continue  # the developer's test labels, loading a save
                 if len(chain) > 1:
                     routed.add(id(mk))
                 cand = _candidate(index, mk, chain, list(mk_steps), char, global_ns, local_ns, store,
@@ -2259,6 +2270,11 @@ def _build_plan(index, kind, name, char, store, meta=None, marker=None, lead_for
     plan.skipped = [c for c in plan.skipped if c.kind in skip_kinds]
     trig = _trigger_conds(index, plan, char, store, global_ns, local_ns)
     if trig is False:
+        if kind in STATEMENT_KINDS:
+            # Only for another girl in the game: the guide can still do it for her.
+            plan.statement = plan.never = True
+            _fill_location(plan, meta, char, store)
+            return plan
         plan.reason = "In the game this event only happens with another girl."
         _fill_location(plan, meta, char, store)
         return plan
@@ -2319,6 +2335,8 @@ def _build_plan(index, kind, name, char, store, meta=None, marker=None, lead_for
         # Handed in by a contest round that drew the girls: start that
         # part directly with her.
         plan.drawn = True
+        _fill_location(plan, meta, char, store)
+        where = plan.location  # where the contest is held
         top = index.top_of.get(plan.marker.entry, plan.marker.owner)
         args = _direct_args(index, top)
         if args is not None:
@@ -2332,6 +2350,7 @@ def _build_plan(index, kind, name, char, store, meta=None, marker=None, lead_for
             plan.launchable = True
             plan.notes.append("The game draws who takes part while it runs; the guide starts this part directly with her.")
             _fill_location(plan, meta, char, store)
+            plan.location = where or plan.location
             return plan
     elif role and store is not None:
         # l_bartender = jobs.bartender: she has to be the one on duty.
@@ -2413,6 +2432,11 @@ def _build_plan(index, kind, name, char, store, meta=None, marker=None, lead_for
 SENDER_KINDS = ("message",)
 # Things the guide can do with the game's own statement when no route leads there.
 STATEMENT_KINDS = ("schedule", "message", "sexting", "websearch")
+
+
+def _housekeeping(label):
+    """Labels that run when a save is loaded or updated, not in play."""
+    return label in ("after_load", "version_check", "splashscreen", "start") or label.startswith("version_")
 
 
 def fixed_sender(marker, store):
@@ -2976,6 +3000,8 @@ def _direct_args(index, label, fixed=None):
             continue
         if default is not None:
             continue
+        if "participant" in low:
+            return None  # a poker player object only the card game makes
         charlike = "char" in low or "girl" in low or "opponent" in low
         if i == 0 or low in CHAR_NAMES:
             out.append((None, "__char__"))
@@ -3061,11 +3087,28 @@ def _fill_location(plan, meta, char, store=None):
         loc = char.fname + "_room"
     if not loc and plan.entry_return:
         loc = location_from_return(plan.entry_return)
+    if not loc and plan.entry_return and store is not None:
+        # An appointment the main loop starts: where the game holds it.
+        pool = [a for a in getattr(store, "gl_appointment_pool", []) or []
+                if getattr(a, "action_event", "") == plan.entry_return and getattr(a, "locs_available", None)]
+        # Hers first (Mercedes plays poker in your room, Joy in her office).
+        pool.sort(key=lambda a: 0 if char in (getattr(a, "chars_available", None) or []) else 1)
+        if pool:
+            loc = pool[0].locs_available[0]
     if not loc and char is not None and plan.index is not None:
         # visit_girls_room_main: location = char1.fname + "_room"
         for hop in plan.hops[1:]:
             if any(ROOM_LOC_RE.search(s) for s in _label_sources(plan.index, hop.label)):
                 loc = char.fname + "_room"
+                break
+    if not loc:
+        # restaurant_story_bus_amy: the place is in the name of a label on the way.
+        for label in [plan.target_label or ""] + [h.label for h in plan.hops[plan.target_idx + 1:]]:
+            for tok in label.split("_"):
+                if tok in KNOWN_LOCATIONS:
+                    loc = tok
+                    break
+            if loc:
                 break
     if not loc:
         for c in plan.conds:
@@ -3118,6 +3161,14 @@ def resolve_args(index, plan, char, store):
                 # A leftover local variable, or a role like jobs.doctor:
                 # the scene is about the chosen character.
                 v = char
+            params = index.params.get(plan.target_label, [])
+            pname = kw or (params[len(values)][0] if len(values) < len(params) else "")
+            if pname in CHAR_NAMES and not _is_char_obj(v):
+                v = char  # her, whatever was left in the variable
+            if v is None and "list" in (pname + src).lower() and ("char" in (pname + src).lower() or "girl" in (pname + src).lower()):
+                # The girls at the table: her and someone else.
+                others = [o for o in getattr(store, "list_of_characters", []) if o is not char]
+                v = [char] + others[:2]
         if kw:
             kwvalues[kw] = v
         else:
@@ -3130,6 +3181,62 @@ def resolve_args(index, plan, char, store):
             else:
                 kwvalues[pname] = plan.argfix[pname]
     return values, kwvalues
+
+
+def caller_values(index, plan, char, store):
+    """
+    Variables the target label reads but its caller sets (i_return of the
+    event check, l_moderator of the contest): their values when the guide
+    calls it on its own.
+    """
+    label = plan.target_label
+    node = index.labels.get(label)
+    if node is None or store is None:
+        return {}
+    reads = set()
+    for src in _label_sources(index, label):
+        reads |= set(re.findall(r"\b((?:i|l)_\w+)", src))
+    for st in _all_nodes(node.block):
+        if cls_name(st) == "If":
+            for c, _b in st.entries:
+                reads |= set(re.findall(r"\b((?:i|l)_\w+)", text(c)))
+        for attr in ("what", "line"):
+            reads |= set(re.findall(r"\[((?:i|l)_\w+)", text(getattr(st, attr, "") or "")))
+        imspec = getattr(st, "imspec", None)
+        if imspec and imspec[1]:
+            reads |= set(re.findall(r"\b((?:i|l)_\w+)", text(imspec[1])))
+    own = set(p for p, _d in index.params.get(label, [])) | index.label_locals.get(index.top_of.get(label, label), set())
+    want = sorted(n for n in reads if n not in own)
+    if not want:
+        return {}
+    gns = store.__dict__
+    ns = dict((n, char) for n in CHAR_NAMES)
+    if plan.target_idx >= 1 and len(plan.hops) > plan.target_idx:
+        try:
+            _v, _kw, ns = _evaluate_chain(index, plan.hops, plan.target_idx - 1, char, gns, ns, plan.location)
+        except Exception:
+            pass
+    callers = [index.top_of.get(e.caller, e.caller) for e in index.callers.get(label, [])]
+    out = {}
+    for name in want:
+        if name in ns and ns[name] is not None:
+            out[name] = ns[name]
+            continue
+        found = None
+        for caller in callers:
+            named = fixed_local_char(index, caller, name)
+            if named and _is_char_obj(getattr(store, named, None)):
+                found = getattr(store, named)
+                break
+            role = role_local(index, caller, name)
+            if role:
+                found = safe_value(role, gns, {})[0]
+                break
+        if found is None and "return" in name:
+            found = "goto_%s" % (plan.location or "player_room")
+        if found is not None:
+            out[name] = found
+    return out
 
 
 def quest_step_markers(index, qname, state):

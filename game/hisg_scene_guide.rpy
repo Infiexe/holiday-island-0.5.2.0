@@ -840,6 +840,12 @@ init 900 python:
         if m:
             who = hisg_quest_owner(m.group(1), hisg_char_by_var(m.group(2), char))
             return u"Quest \u201c%s\u201d %s" % (hisg_esc(hisg_quest_title(m.group(1), who)), u"has been given to you" if want else u"has not been given yet")
+        if hisg_re.match(r"^player\.get_appointments_soon\(", src):
+            return (u"You have an appointment within the next hour" if want
+                    else u"You have no appointment within the next hour")
+        if hisg_re.match(r"^player\.get_appointment_not_done\(", src):
+            return (u"You are late for an appointment today" if want
+                    else u"You are not late for any appointment today")
         if hisg_re.match(r"^player\.get_appointments_soon_data\(", src):
             return u"You have an appointment coming up" if want else u"You have no appointment coming up right now"
         m = hisg_re.match(r"""^(\w+)\.get_sexting_times_used\((\d+)(?:,\s*\w+)?\)$""", src)
@@ -2388,7 +2394,7 @@ init 900 python:
     def hisg_temp_set(obj, attr, value):
         """Changed for this scene only (put back afterwards, see hisg_roles_restore)."""
         try:
-            hisg.RUNTIME.setdefault("roles", []).append((obj, attr, getattr(obj, attr), value))
+            hisg.RUNTIME.setdefault("roles", []).append((obj, attr, getattr(obj, attr, None), value))
             setattr(obj, attr, value)
         except Exception:
             pass
@@ -2587,6 +2593,11 @@ init 900 python:
             if getattr(obj, attr, None) is not ch:
                 setattr(obj, attr, ch)
 
+    def hisg_vars_restore():
+        for var, old in reversed(hisg.RUNTIME.get("temp_vars") or []):
+            setattr(store, var, old)
+        hisg.RUNTIME["temp_vars"] = []
+
     def hisg_roles_restore():
         for obj, attr, old, _ch in reversed(hisg.RUNTIME.get("roles") or []):
             try:
@@ -2636,6 +2647,37 @@ init 900 python:
             setattr(cls, attr, orig)
         hisg.RUNTIME["unpatch"] = []
 
+    def hisg_temp_appointment(plan, char):
+        """
+        The game's event check starts an appointment it finds in your
+        calendar (get_appointment_not_done). When the guide plays it without
+        one there, it puts it in the calendar for the scene.
+        """
+        if not any("get_appointment_not_done(" in c.src or "get_appointments_soon(" in c.src for c in plan.conds):
+            return
+        if player.get_appointment_not_done(actions_left) is not None:
+            return
+        ids = hisg_appointment_ids(plan)
+        for c in plan.conds:
+            m = hisg_re.search(r"\.id\s*==\s*(\d+)", c.src)
+            if m and "appointment" in c.src:
+                ids.append(int(m.group(1)))
+        if not ids:
+            return
+        i = ids[-1]
+        pool = gl_appointment_pool[i]
+        loc = plan.location or location
+        app = cl_appointment(i, char, loc, actions_left + 1, False, pool.auto_start, pool.actionpoints_prepare)
+        app.tooltip = pool.description.replace("&1", char.fname).replace("&2", loc)
+        player.appointments_today.append(app)
+        hisg.RUNTIME.setdefault("temp_appointments", []).append(app)
+
+    def hisg_temp_appointment_remove():
+        for app in hisg.RUNTIME.get("temp_appointments") or []:
+            if app in player.appointments_today and not app.done:
+                player.appointments_today.remove(app)
+        hisg.RUNTIME["temp_appointments"] = []
+
     def hisg_setup_effects(plan):
         for c in plan.conds:
             if c.kind != "effect" or c.data["effect"] != "erection":
@@ -2656,6 +2698,8 @@ init 900 python:
         rt["background"] = []
         hisg_pick_remove()
         hisg_random_unpick()
+        hisg_vars_restore()
+        hisg_temp_appointment_remove()
         hisg_roles_restore()
         rt["patcher"].restore()
         rt["highlight"].clear()
@@ -2739,6 +2783,7 @@ init 900 python:
             for c in plan.conds:
                 if c.kind == "role":
                     hisg_set_role(c.data["expr"], hisg_char_by_var(c.data.get("who", "char1"), char))
+        hisg_temp_appointment(plan, char)
         if kind == "appointment" and not replay:
             # Played now, so it should not start again later.
             ids = hisg_appointment_ids(plan)
@@ -2758,6 +2803,11 @@ init 900 python:
             return None
         rt["background"] = list(getattr(plan, "background", []) or [])
         values, kwvalues = hisg.resolve_args(hisg_index(), plan, char, store)
+        for var, value in hisg.caller_values(hisg_index(), plan, char, store).items():
+            # Set by the label that normally calls it (i_return, l_moderator).
+            if getattr(store, var, None) is None or var.startswith("i_"):
+                hisg.RUNTIME.setdefault("temp_vars", []).append((var, getattr(store, var, None)))
+                setattr(store, var, value)
         if guided:
             kwvalues.update(hisg.auto_succeed_kwargs(hisg_index(), plan))
         if plan.poker_win:
@@ -2829,17 +2879,26 @@ init 900 python:
                 for pic in pics:
                     if not hisg_re.search(r"\[(char1|event_char|selected_char)\.fname\]", pic):
                         continue  # only pictures of the girl herself
+                    # Any outfit counts: the guide dresses her for the scene.
+                    paths = []
+                    wear = (getattr(char, "swimwear", 0), getattr(char, "nightwear", 0))
                     try:
-                        path = renpy.substitute(pic, translate=False)
-                    except Exception:
-                        continue
-                    if "[" in path:
+                        for v in range(5):
+                            char.swimwear = char.nightwear = v
+                            try:
+                                paths.append(renpy.substitute(pic, translate=False))
+                            except Exception:
+                                pass
+                    finally:
+                        char.swimwear, char.nightwear = wear
+                    paths = [x for x in paths if "[" not in x]
+                    if not paths:
                         continue
                     checked += 1
-                    if renpy.loadable(path):
+                    if any(renpy.loadable(x) for x in paths):
                         found += 1
                     elif not first:
-                        first = path
+                        first = paths[0]
                 if checked >= 4:
                     break
         finally:
@@ -2863,7 +2922,7 @@ init 900 python:
             pass
 
     def hisg_begin(replay, char=None):
-        hisg.RUNTIME["run"] = {"replay": replay, "char": char}
+        hisg.RUNTIME["run"] = {"replay": replay, "char": char, "guided": bool(persistent.hisg_guided) or replay}
         if replay:
             store.g_replay = True
 
@@ -2957,6 +3016,8 @@ init 900 python:
         hisg_poker_shortcut(False)
         hisg_pick_remove()
         hisg_random_unpick()
+        hisg_vars_restore()
+        hisg_temp_appointment_remove()
         hisg_roles_restore()
         rt["patcher"].restore()
         rt["highlight"].clear()
@@ -3050,7 +3111,7 @@ init 900 python:
         # "Which girl do you want to visit?" on the way to her scene: her.
         run = hisg.RUNTIME.get("run")
         if run and run.get("char") is not None and name == "select_girl" and len(args) >= 2 \
-                and args[1] == "Visit" and run["char"] in list(args[0] or []):
+                and args[1] == "Visit" and (run["char"] in list(args[0] or []) or run.get("guided")):
             return run["char"]
         return hisg.RUNTIME["orig_call_screen"](name, *args, **kwargs)
 
