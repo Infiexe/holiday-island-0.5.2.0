@@ -1286,6 +1286,14 @@ init 900 python:
                 who = hisg_char_by_var(m.group(2), char)
                 return u"%s %s the girl you met on the plane" % (hisg_esc(getattr(who, "fname", m.group(2))),
                                                                   u"was" if op == "Eq" else u"was not")
+            # char1.id != jobs.roomservice.id
+            m = hisg_re.match(r'^(\w+)(?:\.id)?\s*(==|!=)\s*jobs\.(\w+)(?:\.id)?$', src)
+            if m and op in ("Eq", "NotEq"):
+                who = hisg_char_by_var(m.group(1), char)
+                now = getattr(store.jobs, m.group(3), None)
+                return u"%s is %sthe %s on duty (now %s)" % (hisg_esc(getattr(who, "fname", m.group(1))),
+                                                            u"" if op == "Eq" else u"not ", m.group(3).replace("_", " "),
+                                                            hisg_esc(getattr(now, "fname", u"nobody")))
             # jobs.roomservice.id != amy.id
             m = hisg_re.match(r'^jobs\.(\w+)(?:\.id)?\s*(==|!=)\s*(\w+)(?:\.id)?$', src)
             if m and op in ("Eq", "NotEq"):
@@ -1998,7 +2006,7 @@ init 900 python:
                 what = value.replace("visit_girls_room_", "").replace("visit_", "").replace("_", " ")
                 t = u"Random: the game draws what happens (“%s” is one of the options) - the guide makes it this one" % hisg_esc(what)
             else:
-                t = u"Random: the game draws which version of the scene you get - the guide makes it number %s" % value
+                t = u"Random: the game draws one of the things that can happen now (this is number %s) - the guide makes it this one" % value
             rows.insert(0, ("auto", t, None))
         orow = hisg_outfit_row(char, meta, plan, guided)
         if orow is not None:
@@ -2038,6 +2046,8 @@ init 900 python:
             for c in plan.skipped:
                 if c.kind not in ("chance", "skill"):
                     continue
+                if c.negated and c.step is not None and c.step[0] == "if":
+                    continue  # the roll of another event checked before this one
                 if c.kind == "chance":
                     t, p = hisg_chance_text(c, lead or char, defaults)
                 else:

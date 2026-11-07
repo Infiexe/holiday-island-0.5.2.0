@@ -379,6 +379,7 @@ class Index(object):
         self.item_quests = {}     # quest item name -> quest it belongs to
         self.dyn_markers = []     # Marker with a name built while the game runs
         self.flag_setters = {}    # (top level label, local flag) -> [(value source, path)]
+        self.list_adds = {}       # (top level label, list, value) -> [path] where the value is put on the list
         self.top_of = {}          # label (nested too) -> its top level label
         self.callees = {}         # top level label -> labels it calls
         self.statement_count = 0
@@ -689,6 +690,13 @@ class Index(object):
             m = re.match(r"""^\s*(\w+)\s*\.\s*append\(\s*["'](\w+)["']\s*\)\s*$""", line)
             if m:
                 ctx["appends"].setdefault(m.group(1), []).append((m.group(2), entry, rel))
+            # ll_event_ids.append(3), cl_utility().add_options(3, 20, ..., ll_event_ids):
+            # the values a later draw can give.
+            m = re.match(r"^\s*(\w+)\s*\.\s*append\(\s*(-?\d+)\s*\)\s*$", line) or \
+                re.match(r"^.*\badd_options\(\s*(-?\d+)\s*,.*,\s*(\w+)\s*\)\s*$", line)
+            if m:
+                lst, val = (m.group(1), m.group(2)) if "append" in line else (m.group(2), m.group(1))
+                self.list_adds.setdefault((owner, lst, val), []).append(path)
         for m in MARK_RE.finditer(src):
             subj, kind, name = m.group(1), m.group(2), m.group(3)
             self.markers.setdefault((kind, name), []).append(self._remember(
@@ -1006,6 +1014,8 @@ def _expand_one(index, c, owners, route_keys, route_branch):
                 continue
             total += r[0]
             steps.extend(st for st in r[1] if st not in steps)
+            if len(r) > 3:
+                return None  # a draw inside an and: too much to arrange
             if r[2]:
                 subs.append("(%s)" % r[2])
         if not steps and not subs:
@@ -1022,6 +1032,19 @@ def _expand_one(index, c, owners, route_keys, route_branch):
                 continue
             if rhs.strip()[:1] in "[({":
                 continue  # a list the scene fills
+            mc = re.match(r"^renpy\.random\.choice\(\s*(\w+)\s*\)$", rhs.strip())
+            mv = re.match(r"^%s\s*==\s*(-?\d+)$" % re.escape(var), c.src.strip())
+            if mc and mv and not c.negated:
+                # l_event_id = renpy.random.choice(ll_event_ids) ... == 3: what
+                # puts 3 on the list, and the guide makes the draw give it.
+                for lpath in index.list_adds.get((owner, mc.group(1), mv.group(1)), []):
+                    extra = _flag_route(lpath, route_keys, route_branch)
+                    if extra is not None:
+                        cand = (len(extra), extra, None, int(mv.group(1)))
+                        if best is None or cand[0] < best[0]:
+                            best = cand
+                        break
+                continue
             if LITERAL_RE.match(rhs.strip()):
                 ok = safe_eval(c.expr, {}, {var: safe_value(rhs, {}, {})[0]})[0]
                 if ok is not True:
@@ -1091,7 +1114,9 @@ def expand_flags(index, plan, global_ns):
         if best is None:
             out.append(c)
             continue
-        _score, extra, sub = best
+        _score, extra, sub = best[:3]
+        if len(best) > 3:
+            plan.pick_values = list(getattr(plan, "pick_values", []) or []) + [best[3]]
         new = [nc for nc in path_conds(extra)
                if not any(o.src == nc.src and o.negated == nc.negated for o in out)]
         if sub is not None:
@@ -2158,6 +2183,8 @@ def _build_plan(index, kind, name, char, store, meta=None, marker=None, lead_for
                                      fixed_subject=fixed or lead_for is not None or fixed_sender(mk, store)):
                 if chain[0].label != MAIN_LOOP_LABEL and (chain[0].label.startswith("test") or _housekeeping(chain[0].label)):
                     continue  # the developer's test labels, loading a save
+                if any("cheat" in h.label.lower() for h in chain[1:2]):
+                    continue  # the game's cheat menu is not a way to play it
                 if len(chain) > 1:
                     routed.add(id(mk))
                 cand = _candidate(index, mk, chain, list(mk_steps), char, global_ns, local_ns, store,
@@ -2394,11 +2421,32 @@ def _build_plan(index, kind, name, char, store, meta=None, marker=None, lead_for
             continue
         keep.append(c)
     plan.conds = keep
+    # What the route hands the labels as plain values decides parts of the
+    # checks (i_action_event == "Event_short_lost_phone"): left out.
+    literal = _chain_literals(index, plan.hops, t)
+    if literal:
+        simple = []
+        for c in plan.conds:
+            names = _cond_names(c.src)
+            if c.kind != "choice" and names & set(literal):
+                new = simplify_with(c.src, literal)
+                if new == "True":
+                    if not c.negated:
+                        continue
+                elif new == "False":
+                    if c.negated:
+                        continue
+                elif new is not None:
+                    for a, neg in atoms(new, c.negated):
+                        simple.append(_carry(Cond(a, neg, step=c.step), c))
+                    continue
+            simple.append(c)
+        plan.conds = simple
     for _i in range(3):
         # The choice that sets a flag can sit behind another flag.
         expand_flags(index, plan, global_ns)
     plan.argfix = best.get("argfix", {})
-    plan.pick_values = best.get("pick_values", [])
+    plan.pick_values = best.get("pick_values", []) + list(getattr(plan, "pick_values", []) or [])
     if t >= 2 and plan.hops[t].edge is not None:
         plan.background = list(getattr(plan.hops[t].edge, "scenes", []) or [])
     for hop in plan.hops:
@@ -2462,6 +2510,70 @@ def _arg_names_subject(index, label, pos, kw):
     if not params or params[0] not in CHAR_NAMES:
         return False
     return kw == params[0] if kw else pos == 0
+
+
+def simplify_with(src, values):
+    """
+    i_action_event == "Event_short_lost_phone" and char1.id != jobs.roomservice.id
+    with i_action_event known -> char1.id != jobs.roomservice.id. Returns the
+    shorter source, "True" / "False" when it is decided, or None.
+    """
+    try:
+        tree = pyast.parse(text(src).replace("<>", "!="), mode="eval").body
+    except SyntaxError:
+        return None
+    changed = [False]
+
+    def known(n):
+        return cls_name(n) == "Name" and n.id in values
+
+    def const(n):
+        if known(n):
+            return True, values[n.id]
+        try:
+            return True, safe_value(unparse(n), {}, {})[0] if LITERAL_RE.match(unparse(n)) else None
+        except Exception:
+            return False, None
+
+    def walk(n):
+        c = cls_name(n)
+        if c == "UnaryOp" and cls_name(n.op) == "Not":
+            v = walk(n.operand)
+            return (not v) if isinstance(v, bool) else n
+        if c == "BoolOp":
+            is_and = cls_name(n.op) == "And"
+            rest = []
+            for x in n.values:
+                v = walk(x)
+                if isinstance(v, bool):
+                    changed[0] = True
+                    if v != is_and:
+                        return v  # False in an and, True in an or
+                    continue
+                rest.append(v)
+            if not rest:
+                return is_and
+            if len(rest) == 1:
+                return rest[0]
+            n.values = rest
+            return n
+        if c == "Compare" and len(n.ops) == 1 and (known(n.left) or known(n.comparators[0])):
+            v, _r = safe_eval(unparse(n), {}, values)
+            if isinstance(v, bool):
+                changed[0] = True
+                return v
+        if c == "Name" and n.id in values and isinstance(values[n.id], bool):
+            changed[0] = True
+            return values[n.id]
+        return n
+    out = walk(tree)
+    if not changed[0]:
+        return None
+    if isinstance(out, bool):
+        return "True" if out else "False"
+    if cls_name(out) == "UnaryOp" and cls_name(out.op) == "Not":
+        return "not (%s)" % unparse(out.operand)
+    return unparse(out)
 
 
 def _rename_vars(src, rename):
@@ -2657,8 +2769,8 @@ def _candidate(index, mk, chain, mk_steps, char, global_ns, local_ns, store=None
         lns = dict(local_ns)
         lns.update(literal)
         for c in conds:
-            names = set(re.findall(r"\b[A-Za-z_]\w*\b", c.src))
-            if names and names <= set(literal) | {"True", "False", "None", "not", "and", "or"}:
+            names = _cond_names(c.src)  # not the words inside "Event_short_..." strings
+            if names and names <= set(literal):
                 v, _r = safe_eval(c.expr, {}, lns)
                 if v is False:
                     return None
@@ -2876,12 +2988,17 @@ def _identity_term(node):
     if cls_name(node) == "UnaryOp" and cls_name(node.op) == "Not":
         node = node.operand
     if cls_name(node) == "Call" and _dotted(node.func) in ("renpy.has_label", "renpy.loadable") \
-            and any(n in unparse(node) for n in CHAR_NAMES):
-        return True  # her own version of a label or picture
+            and any(n in unparse(node) for n in CHAR_NAMES) \
+            and not re.search(r"\b(location\d?|swimwear|nightwear|dinerwear|receptionwear|doctorwear)\b", unparse(node)):
+        # Her own version of a label or picture (not one that depends on
+        # where she is or what she wears: the guide arranges those).
+        return True
     if cls_name(node) != "Compare" or len(node.ops) != 1:
         return False
     if cls_name(node.ops[0]) not in ("Eq", "NotEq", "Is", "IsNot", "In", "NotIn"):
         return False
+    if "jobs." in unparse(node):
+        return False  # char1 is the room service on duty: a job, which can change
     for side in (node.left, node.comparators[0]):
         if cls_name(side) == "Attribute" and side.attr in ("id", "fname") \
                 and cls_name(side.value) == "Name" and side.value.id in CHAR_NAMES:
@@ -3081,6 +3198,12 @@ def _fill_location(plan, meta, char, store=None):
         # Where the way there starts (you ask her at the bar for a poker
         # evening in your room).
         loc = location_from_return(plan.entry_return)
+    if not loc and plan.entry_return.startswith("do_"):
+        # pool_tease_yvette: the label the guide starts names the place.
+        for tok in (plan.target_label or "").split("_"):
+            if tok in KNOWN_LOCATIONS:
+                loc = tok
+                break
     if not loc and meta is not None:
         loc = getattr(meta, "location", "") or ""
     if loc == "Girl_room" and char is not None:
@@ -3291,12 +3414,18 @@ def default_values(plan, store):
                 pos += 1
             if name and LITERAL_RE.match(src.strip()):
                 out[name] = safe_value(src, {}, {})[0]
-    # Keyword arguments the guide passes (play_poker(..., i_appointment=True)).
+    # Arguments the guide passes (play_poker(..., i_appointment=True),
+    # short_events_player_room_main(desire, "Event_short_lost_phone")).
+    params = [p for p, _d in index_params(plan, plan.target_label)]
+    pos = 0
     for kw, src in plan.call_args:
-        if kw:
+        name = kw or (params[pos] if pos < len(params) else None)
+        if not kw:
+            pos += 1
+        if name and (kw or LITERAL_RE.match(text(src).strip())):
             v, reason = safe_value(src, store.__dict__ if store is not None else {}, {})
             if not reason:
-                out[kw] = v
+                out[name] = v
     return out
 
 
